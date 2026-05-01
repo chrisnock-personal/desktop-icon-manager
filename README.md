@@ -19,7 +19,16 @@ immediate mode GUI, no GTK/Qt dependency at runtime).
 | **Chrome PWA support** | Auto-detects PWA entries; one-click `StartupWMClass` fix |
 | **Search / filter** | Filter by app name or icon path; toggle "PWAs only" |
 | **Non-destructive** | Changes only written when you click **Save** |
-| **Dark theme** | Polished dark UI, no compositor required |
+
+---
+
+## Screenshots
+<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/0dfbc44d-912b-401e-8e3c-229ef1ca0b0e" /> <br>
+<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/b4501d16-168f-434b-86a2-e4847630e827" /><br>
+<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/db66bb59-c6b3-4970-8407-19b6a519ba7e" /><br>
+<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/5898b5fd-f8da-4c91-988e-b00672713131" /><br>
+<img width="493" height="205" alt="Image" src="https://github.com/user-attachments/assets/a43bddf7-d705-4ff2-9be2-e3f78d934dab" /><br>
+<img width="256" height="83" alt="Image" src="https://github.com/user-attachments/assets/5885c1c4-ebad-4527-81f3-c259c2882f6b" /> <br>
 
 ---
 
