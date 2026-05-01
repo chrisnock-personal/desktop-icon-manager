@@ -1,0 +1,24 @@
+[package]
+name = "desktop-icon-manager"
+version = "1.0.0"
+edition = "2021"
+description = "A native Linux GUI tool for managing .desktop file icons"
+authors = ["Desktop Icon Manager"]
+
+[[bin]]
+name = "desktop-icon-manager"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.27", features = ["default"] }
+egui = "0.27"
+egui_extras = { version = "0.27", features = ["image", "svg"] }
+image = { version = "0.25", features = ["png", "jpeg", "ico", "bmp", "tiff", "webp"] }
+rfd = "0.14"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
