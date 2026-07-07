@@ -208,8 +208,10 @@ struct IconManagerApp {
     icons_dir: PathBuf,
     /// Editable text buffer for the icons dir path field
     icons_dir_input: String,
-    /// Applications folder: ~/.local/share/applications
-    apps_dir: PathBuf,
+    /// Ordered list of directories to scan for .desktop files.
+    /// Local (~/.local/share/applications) is first so it takes priority
+    /// over system entries with the same filename.
+    apps_dirs: Vec<PathBuf>,
 }
 
 impl IconManagerApp {
@@ -244,7 +246,12 @@ impl IconManagerApp {
         cc.egui_ctx.set_visuals(visuals);
 
         let home = dirs_next();
-        let apps_dir = home.join(".local/share/applications");
+        // Scan local first (higher priority), then system-wide
+        let apps_dirs = vec![
+            home.join(".local/share/applications"),
+            PathBuf::from("/usr/share/applications"),
+            PathBuf::from("/usr/local/share/applications"),
+        ];
         let icons_dir = home.join("Pictures/Icons");
 
         // Ensure icons directory exists
@@ -254,7 +261,7 @@ impl IconManagerApp {
 
         let icons_dir_input = icons_dir.display().to_string();
         let mut app = Self {
-            apps_dir,
+            apps_dirs,
             icons_dir,
             icons_dir_input,
             ..Default::default()
@@ -268,52 +275,126 @@ impl IconManagerApp {
         self.selected = None;
         self.global_status = String::new();
 
-        if !self.apps_dir.exists() {
-            self.global_status = format!(
-                "Applications directory not found: {}",
-                self.apps_dir.display()
-            );
-            return;
-        }
+        // Track filenames already loaded (local entries shadow system ones)
+        let mut seen_filenames = std::collections::HashSet::new();
+        let mut total_dirs_scanned = 0;
 
-        match fs::read_dir(&self.apps_dir) {
-            Ok(dir) => {
-                let mut paths: Vec<PathBuf> = dir
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("desktop"))
-                    .collect();
-                paths.sort();
+        for apps_dir in &self.apps_dirs.clone() {
+            if !apps_dir.exists() {
+                continue;
+            }
+            let dir = match fs::read_dir(apps_dir) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            total_dirs_scanned += 1;
 
-                for path in paths {
-                    if let Some(entry) = DesktopEntry::load(path) {
-                        self.entries.push(entry);
-                    }
+            let mut paths: Vec<PathBuf> = dir
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("desktop"))
+                .collect();
+            paths.sort();
+
+            for path in paths {
+                // Use just the filename as the dedup key so local entries
+                // shadow system entries with the same name
+                let fname = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if seen_filenames.contains(&fname) {
+                    continue;
                 }
-                self.global_status =
-                    format!("Loaded {} .desktop entries", self.entries.len());
-            }
-            Err(e) => {
-                self.global_status = format!("Error reading applications dir: {e}");
+                seen_filenames.insert(fname);
+
+                if let Some(entry) = DesktopEntry::load(path) {
+                    self.entries.push(entry);
+                }
             }
         }
+
+        // Sort all entries alphabetically by name
+        self.entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        self.global_status = format!(
+            "Loaded {} entries from {} director{}",
+            self.entries.len(),
+            total_dirs_scanned,
+            if total_dirs_scanned == 1 { "y" } else { "ies" }
+        );
     }
 
     /// Copy icon file to the configured icons directory and return the absolute path string.
     /// Always uses an absolute path — ~ is not expanded by desktop file parsers.
+    /// Copy icon to the icons dir, install into the XDG hicolor theme at all
+    /// standard sizes, and return the bare theme name (e.g. "myapp").
+    ///
+    /// Docks and app launchers (GNOME Shell, KDE Plasma, XFCE Panel …) look up
+    /// Icon= by theme name — a raw file path silently fails for pinned/running
+    /// dock entries even though it works fine in the file manager.
     fn import_icon(&self, source: &Path) -> Result<String, String> {
         let filename = source
             .file_name()
             .ok_or("Invalid source filename")?
             .to_string_lossy()
             .to_string();
+
+        // Derive a clean theme name: strip extension, sanitise chars
+        let theme_name = source
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect::<String>()
+            .to_lowercase();
+
+        // 1. Copy original to the user's icons directory
         let dest = self.icons_dir.join(&filename);
         fs::copy(source, &dest).map_err(|e| format!("Copy failed: {e}"))?;
-        // Always return the absolute, canonical path — ~ is shell syntax and
-        // is NOT expanded by desktop file parsers (GNOME, KDE, etc.)
-        dest.canonicalize()
-            .map(|p| p.display().to_string())
-            .map_err(|e| format!("Could not resolve path: {e}"))
+        let dest = dest.canonicalize()
+            .map_err(|e| format!("Could not resolve path: {e}"))?;
+
+        // 2. Install into ~/.local/share/icons/hicolor at every standard size
+        //    so docks, panels, and launchers can resolve the name correctly.
+        let home = dirs_next();
+        let hicolor_base = home.join(".local/share/icons/hicolor");
+        let pixmaps_dir  = home.join(".local/share/pixmaps");
+
+        let ext = source.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
+
+        if ext == "svg" {
+            let svg_dir = hicolor_base.join("scalable/apps");
+            let _ = fs::create_dir_all(&svg_dir);
+            let _ = fs::copy(&dest, svg_dir.join(format!("{theme_name}.svg")));
+        } else {
+            if let Ok(img) = image::open(&dest) {
+                for size in [16u32, 32, 48, 64, 128, 256, 512] {
+                    let size_dir = hicolor_base.join(format!("{size}x{size}/apps"));
+                    let _ = fs::create_dir_all(&size_dir);
+                    let resized = img.resize(size, size, image::imageops::FilterType::Lanczos3);
+                    let _ = resized.save(size_dir.join(format!("{theme_name}.png")));
+                }
+            }
+        }
+
+        // Pixmaps fallback (Nautilus, some legacy DEs)
+        let _ = fs::create_dir_all(&pixmaps_dir);
+        let _ = fs::copy(&dest, pixmaps_dir.join(format!("{theme_name}.png")));
+
+        // 3. Flush the icon cache so the change takes effect immediately
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-f", "-t"])
+            .arg(&hicolor_base)
+            .output();
+
+        // Return the bare theme name — NOT a file path
+        Ok(theme_name)
     }
 
     fn load_icon_texture(
@@ -344,10 +425,18 @@ impl IconManagerApp {
 }
 
 /// Resolve an icon value to an actual file path (absolute or ~-prefixed).
+/// Resolve an icon value to a file path for in-app preview rendering.
+/// Search order (largest→smallest for best preview quality):
+///   1. Direct path (absolute or legacy ~ prefix)
+///   2. User-local hicolor theme  (~/.local/share/icons/hicolor/…)
+///   3. User pixmaps              (~/.local/share/pixmaps)
+///   4. System hicolor theme      (/usr/share/icons/hicolor/…)
+///   5. System pixmaps            (/usr/share/pixmaps)
 fn resolve_icon_path(value: &str) -> Option<PathBuf> {
     if value.is_empty() {
         return None;
     }
+    // Direct path
     let p = if value.starts_with('~') {
         dirs_next().join(&value[2..])
     } else {
@@ -356,18 +445,36 @@ fn resolve_icon_path(value: &str) -> Option<PathBuf> {
     if p.exists() {
         return Some(p);
     }
-    // Try common icon theme locations for named icons
-    for dir in &[
-        "/usr/share/icons/hicolor/48x48/apps",
-        "/usr/share/icons/hicolor/256x256/apps",
-        "/usr/share/pixmaps",
-    ] {
-        for ext in &["png", "svg", "xpm"] {
-            let candidate = PathBuf::from(dir).join(format!("{value}.{ext}"));
-            if candidate.exists() {
-                return Some(candidate);
-            }
+
+    let home = dirs_next();
+    let local_hicolor = home.join(".local/share/icons/hicolor");
+    let local_pixmaps = home.join(".local/share/pixmaps");
+    let sizes = ["256x256", "128x128", "64x64", "48x48", "scalable", "32x32", "16x16"];
+    let exts  = ["png", "svg", "xpm"];
+
+    // User-local hicolor (where we install uploaded icons)
+    for size in &sizes {
+        for ext in &exts {
+            let c = local_hicolor.join(format!("{size}/apps/{value}.{ext}"));
+            if c.exists() { return Some(c); }
         }
+    }
+    // User pixmaps
+    for ext in &exts {
+        let c = local_pixmaps.join(format!("{value}.{ext}"));
+        if c.exists() { return Some(c); }
+    }
+    // System hicolor
+    for size in &sizes {
+        for ext in &exts {
+            let c = PathBuf::from(format!("/usr/share/icons/hicolor/{size}/apps/{value}.{ext}"));
+            if c.exists() { return Some(c); }
+        }
+    }
+    // System pixmaps
+    for ext in &exts {
+        let c = PathBuf::from(format!("/usr/share/pixmaps/{value}.{ext}"));
+        if c.exists() { return Some(c); }
     }
     None
 }
@@ -445,9 +552,14 @@ impl eframe::App for IconManagerApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    // Apps dir (read-only label)
+                    // Apps dirs (read-only label showing all scanned dirs)
+                    let dirs_str = self.apps_dirs.iter()
+                        .filter(|d| d.exists())
+                        .map(|d| d.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     ui.label(
-                        RichText::new(format!("Apps: {}", self.apps_dir.display()))
+                        RichText::new(format!("Apps: {}", dirs_str))
                             .size(10.0)
                             .color(Color32::from_rgb(90, 100, 140)),
                     );
@@ -832,17 +944,20 @@ impl IconManagerApp {
 
                 if let Some(src_path) = picked {
                     match self.import_icon(&src_path) {
-                        Ok(new_icon_path) => {
-                            // Invalidate old texture cache entry
+                        Ok(theme_name) => {
+                            // Invalidate texture cache so the preview refreshes
                             let old_key = self.entries[sel].icon_value.clone();
                             self.icon_textures.remove(&old_key);
+                            self.icon_textures.remove(&theme_name);
 
-                            self.entries[sel].icon_value = new_icon_path;
+                            self.entries[sel].icon_value = theme_name.clone();
                             self.entries[sel].modified = true;
-                            self.entries[sel].status = Some("Icon imported — save to apply".into());
+                            self.entries[sel].status = Some(
+                                format!("✓ Icon set to \"{theme_name}\" — save to apply")
+                            );
                             self.global_status = format!(
-                                "Icon copied to {}",
-                                self.icons_dir.display()
+                                "Installed icon as theme name \"{}\" — dock & launcher will update on save",
+                                theme_name
                             );
                         }
                         Err(e) => {
@@ -1008,6 +1123,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Desktop Icon Manager")
+            .with_app_id("desktop-icon-manager")  // sets WM_CLASS — must match .desktop filename
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([800.0, 500.0])
             .with_icon(load_app_icon()),

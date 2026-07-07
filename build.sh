@@ -216,6 +216,7 @@ Type=Application
 Categories=Settings;DesktopSettings;Utility;
 Keywords=icon;desktop;application;launcher;
 StartupNotify=true
+StartupWMClass=desktop-icon-manager
 EOF
     chmod +x "$DESKTOP_DIR/$BINARY_NAME.desktop"
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
