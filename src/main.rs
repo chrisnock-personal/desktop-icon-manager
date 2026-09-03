@@ -353,7 +353,20 @@ impl IconManagerApp {
 
         // 1. Copy original to the user's icons directory
         let dest = self.icons_dir.join(&filename);
-        fs::copy(source, &dest).map_err(|e| format!("Copy failed: {e}"))?;
+
+        // If the picked file is already the destination (e.g. re-selecting an
+        // icon that was previously imported into icons_dir), skip the copy.
+        // fs::copy truncates the destination before reading the source, so
+        // copying a file onto itself would zero it out.
+        let source_is_dest = source
+            .canonicalize()
+            .ok()
+            .zip(dest.canonicalize().ok())
+            .is_some_and(|(s, d)| s == d);
+
+        if !source_is_dest {
+            fs::copy(source, &dest).map_err(|e| format!("Copy failed: {e}"))?;
+        }
         let dest = dest.canonicalize()
             .map_err(|e| format!("Could not resolve path: {e}"))?;
 
