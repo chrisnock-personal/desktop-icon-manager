@@ -1,4 +1,4 @@
-// Auto-generated — do not edit by hand
+// Auto-generated -do not edit by hand
 pub const ICON_WIDTH:  u32 = 256;
 pub const ICON_HEIGHT: u32 = 256;
 #[rustfmt::skip]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-icons.sh — Install app icon and .desktop launcher
+# install-icons.sh -Install app icon and .desktop launcher
 # Run this from inside the desktop-icon-manager folder after building.
 set -euo pipefail
 
@@ -15,7 +15,7 @@ ICON_NAME="desktop-icon-manager"
 echo "➤  Installing icons…"
 
 if [ ! -d "$ASSETS_DIR" ]; then
-    echo "✗  assets/ folder not found — make sure you extracted the full tarball."
+    echo "✗  assets/ folder not found -make sure you extracted the full tarball."
     exit 1
 fi
 
@@ -52,7 +52,7 @@ if [ -f "$BINARY" ]; then
     cp "$BINARY" "$INSTALL_DIR/"
     echo "✓  Binary copied to $INSTALL_DIR/desktop-icon-manager"
 else
-    echo "⚠  Binary not found at $BINARY — run 'cargo build --release' first"
+    echo "⚠  Binary not found at $BINARY -run 'cargo build --release' first"
 fi
 
 # Create .desktop launcher

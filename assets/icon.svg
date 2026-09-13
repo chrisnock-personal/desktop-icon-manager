@@ -53,7 +53,7 @@
   </g>
 
   <!-- ── IMAGE CARDS (stack of two, representing icons) ──────────────────── -->
-  <!-- Back card — slightly rotated, peeking out -->
+  <!-- Back card -slightly rotated, peeking out -->
   <g transform="rotate(-8, 64, 63)" filter="url(#cardshadow)">
     <rect x="43" y="48" width="32" height="26" rx="4" ry="4"
           fill="#A8C8FF" fill-opacity="0.85"/>
@@ -63,7 +63,7 @@
     <circle cx="69" cy="57" r="2.5" fill="#FFD166" fill-opacity="0.85"/>
   </g>
 
-  <!-- Front card — straight, on top -->
+  <!-- Front card -straight, on top -->
   <g filter="url(#cardshadow)">
     <rect x="50" y="45" width="33" height="27" rx="4" ry="4" fill="url(#cardGrad)"/>
     <!-- Card top bar (title strip) -->

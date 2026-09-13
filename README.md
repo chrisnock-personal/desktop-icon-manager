@@ -1,7 +1,7 @@
 # Desktop Icon Manager
 
 A native Linux GUI application for managing icons in `.desktop` application
-entries — including full support for Chrome PWA apps.
+entries -including full support for Chrome PWA apps.
 
 Built with **Rust** + **[egui](https://github.com/emilk/egui)** (pure-Rust
 immediate mode GUI, no GTK/Qt dependency at runtime).
@@ -73,7 +73,7 @@ When you upload an icon, the tool does the following automatically:
 4. Runs `gtk-update-icon-cache` so the change takes effect immediately
 5. Sets `Icon=` to the **bare theme name** (e.g. `myapp`) rather than a file path
 
-This ensures icons appear correctly everywhere — in the file manager, dock,
+This ensures icons appear correctly everywhere -in the file manager, dock,
 app launcher, alt-tab switcher, and taskbar.
 
 ### Why not a file path?
@@ -84,7 +84,7 @@ app launcher, alt-tab switcher, and taskbar.
 | `myapp` (theme name) | ✅ Works | ✅ Works |
 
 Docks and panels (GNOME Shell, KDE Plasma, XFCE Panel) resolve `Icon=` by
-theme name lookup — a raw file path is silently ignored for pinned and running
+theme name lookup -a raw file path is silently ignored for pinned and running
 app entries.
 
 ---
@@ -100,7 +100,7 @@ app entries.
 ### Build
 
 - Rust 1.76+ (`rustup` recommended)
-- A handful of `libxcb` and `libxkbcommon` headers — the build script installs
+- A handful of `libxcb` and `libxkbcommon` headers -the build script installs
   these automatically for supported distros
 
 ---
@@ -116,7 +116,7 @@ chmod +x build.sh
 The script will:
 1. Detect your Linux distro and package manager
 2. Install any missing system libraries (`libxcb`, `libxkbcommon`, `openssl`, `fontconfig`)
-3. Check for Rust — prints install instructions if missing
+3. Check for Rust -prints install instructions if missing
 4. Run `cargo build --release`
 5. Optionally copy the binary to `~/.local/bin/`
 6. Install the app icon into `~/.local/share/icons/hicolor/` at all standard sizes
@@ -162,24 +162,24 @@ SKIP_DEPS=1 ./build.sh
 The app lists all discovered `.desktop` entries with their icon thumbnail,
 application name, current `Icon=` value, and flags (e.g. `[PWA]`).
 
-- **Refresh** — re-scans all application directories
-- **Filter** — search by app name or icon value
-- **Chrome PWAs only** — toggle to show only detected PWA entries
+- **Refresh** -re-scans all application directories
+- **Filter** -search by app name or icon value
+- **Chrome PWAs only** -toggle to show only detected PWA entries
 - Click any row to open the **Edit panel**
 
 ### Edit panel
 
-1. **Icon preview** — large preview of the current icon
-2. **Icon= value** — editable text field; edit manually or use the picker
-3. **📁 Upload Icon…** — native file picker (PNG, JPG, SVG, ICO, BMP, WebP):
+1. **Icon preview** -large preview of the current icon
+2. **Icon= value** -editable text field; edit manually or use the picker
+3. **📁 Upload Icon…** -native file picker (PNG, JPG, SVG, ICO, BMP, WebP):
    - Installs into the XDG icon theme automatically
    - Sets `Icon=` to the theme name so docks and launchers work correctly
 4. **Chrome PWA section** (PWA entries only):
    - Shows the detected App ID slug
    - Editable `StartupWMClass=` field
    - **⚡ Auto-fill** sets `StartupWMClass` from the original icon value
-5. **💾 Save** — writes changes back to the `.desktop` file
-6. **↩ Discard** — reloads the entry from disk
+5. **💾 Save** -writes changes back to the `.desktop` file
+6. **↩ Discard** -reloads the entry from disk
 
 ### Configuring the icons directory
 
@@ -228,7 +228,7 @@ If the same filename exists in more than one directory, the first match wins
 > **Note:** Entries from `/usr/share/applications` are owned by root. The app
 > can display and edit their values in the UI, but saving will fail without
 > root privileges. To safely edit a system entry, copy it to
-> `~/.local/share/applications/` first — your local copy will automatically
+> `~/.local/share/applications/` first -your local copy will automatically
 > shadow the system one.
 
 ---
@@ -271,10 +271,10 @@ Copy the `.desktop` file to your local applications directory first:
 cp /usr/share/applications/<file>.desktop ~/.local/share/applications/
 ```
 
-Then edit it in the app — the local copy shadows the system one automatically.
+Then edit it in the app -the local copy shadows the system one automatically.
 
 ---
 
 ## License
 
-MIT — do whatever you like with it.
+MIT -do whatever you like with it.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — Build Desktop Icon Manager from source
+# build.sh -Build Desktop Icon Manager from source
 # Supports: Debian/Ubuntu (apt), Fedora/RHEL/CentOS (dnf/yum),
 #           openSUSE (zypper), Arch Linux (pacman), Void Linux (xbps)
 set -euo pipefail
@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSETS_DIR="$SCRIPT_DIR/assets"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Desktop Icon Manager — Build Script"
+echo "  Desktop Icon Manager -Build Script"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -101,13 +101,13 @@ install_deps() {
             echo "   Running: sudo xbps-install -y ${PKGS[*]}"
             sudo xbps-install -y "${PKGS[@]}" ;;
         *)
-            echo "⚠  Unhandled package manager — skipping (build may fail)." ;;
+            echo "⚠  Unhandled package manager -skipping (build may fail)." ;;
     esac
     echo ""
 }
 
 if [ "${SKIP_DEPS:-0}" = "1" ]; then
-    echo "➤  SKIP_DEPS=1 — skipping dependency installation."
+    echo "➤  SKIP_DEPS=1 -skipping dependency installation."
     echo ""
 elif [ -n "$PKG_MANAGER" ]; then
     install_deps
@@ -195,7 +195,7 @@ elif command -v xdg-icon-resource &>/dev/null; then
     xdg-icon-resource forceupdate 2>/dev/null || true
     echo "✓  Icon cache refreshed (xdg-icon-resource)"
 else
-    echo "   (icon cache not refreshed — gtk-update-icon-cache not found)"
+    echo "   (icon cache not refreshed -gtk-update-icon-cache not found)"
     echo "   Log out and back in if the icon doesn't appear immediately."
 fi
 echo ""
@@ -227,7 +227,7 @@ fi
 
 # ── 8. Also mark the binary itself as executable with the right MIME type ─────
 # Some file managers (Nautilus) show an icon for executables only when they
-# have a matching .desktop file — which we've now created above.
+# have a matching .desktop file -which we've now created above.
 # Force Nautilus/GIO to re-read the desktop db:
 if command -v gio &>/dev/null; then
     gio mime application/x-executable 2>/dev/null || true

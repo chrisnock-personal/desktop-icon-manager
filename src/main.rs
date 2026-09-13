@@ -24,7 +24,7 @@ struct DesktopEntry {
     chrome_app_id: Option<String>,
     /// Current StartupWMClass= value (Chrome PWA only)
     startup_wm_class: Option<String>,
-    /// Dirty flag — true if any field was modified but not yet saved
+    /// Dirty flag -true if any field was modified but not yet saved
     modified: bool,
     /// Status message shown in the row
     status: Option<String>,
@@ -327,12 +327,12 @@ impl IconManagerApp {
     }
 
     /// Copy icon file to the configured icons directory and return the absolute path string.
-    /// Always uses an absolute path — ~ is not expanded by desktop file parsers.
+    /// Always uses an absolute path -~ is not expanded by desktop file parsers.
     /// Copy icon to the icons dir, install into the XDG hicolor theme at all
     /// standard sizes, and return the bare theme name (e.g. "myapp").
     ///
     /// Docks and app launchers (GNOME Shell, KDE Plasma, XFCE Panel …) look up
-    /// Icon= by theme name — a raw file path silently fails for pinned/running
+    /// Icon= by theme name -a raw file path silently fails for pinned/running
     /// dock entries even though it works fine in the file manager.
     fn import_icon(&self, source: &Path) -> Result<String, String> {
         let filename = source
@@ -406,7 +406,7 @@ impl IconManagerApp {
             .arg(&hicolor_base)
             .output();
 
-        // Return the bare theme name — NOT a file path
+        // Return the bare theme name -NOT a file path
         Ok(theme_name)
     }
 
@@ -578,7 +578,7 @@ impl eframe::App for IconManagerApp {
                     );
                     ui.separator();
 
-                    // Icons dir — editable text field + browse button
+                    // Icons dir -editable text field + browse button
                     ui.label(
                         RichText::new("Icons dir:")
                             .size(10.0)
@@ -613,7 +613,7 @@ impl eframe::App for IconManagerApp {
                         }
                     }
 
-                    // Browse button — native folder picker
+                    // Browse button -native folder picker
                     if ui
                         .button(RichText::new("📂").size(13.0))
                         .on_hover_text("Browse for icons folder")
@@ -944,7 +944,7 @@ impl IconManagerApp {
             let upload_btn = ui
                 .button(RichText::new("📁  Upload Icon…").size(13.0))
                 .on_hover_text(format!(
-                    "Select an image file — it will be copied to {}",
+                    "Select an image file -it will be copied to {}",
                     self.icons_dir.display()
                 ));
 
@@ -966,10 +966,10 @@ impl IconManagerApp {
                             self.entries[sel].icon_value = theme_name.clone();
                             self.entries[sel].modified = true;
                             self.entries[sel].status = Some(
-                                format!("✓ Icon set to \"{theme_name}\" — save to apply")
+                                format!("✓ Icon set to \"{theme_name}\" -save to apply")
                             );
                             self.global_status = format!(
-                                "Installed icon as theme name \"{}\" — dock & launcher will update on save",
+                                "Installed icon as theme name \"{}\" -dock & launcher will update on save",
                                 theme_name
                             );
                         }
@@ -1056,7 +1056,7 @@ impl IconManagerApp {
                             .unwrap_or_else(|| self.entries[sel].icon_value.clone());
                         self.entries[sel].startup_wm_class = Some(slug);
                         self.entries[sel].modified = true;
-                        self.entries[sel].status = Some("WMClass set — save to apply".into());
+                        self.entries[sel].status = Some("WMClass set -save to apply".into());
                     }
                 });
         }
@@ -1136,7 +1136,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Desktop Icon Manager")
-            .with_app_id("desktop-icon-manager")  // sets WM_CLASS — must match .desktop filename
+            .with_app_id("desktop-icon-manager")  // sets WM_CLASS -must match .desktop filename
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([800.0, 500.0])
             .with_icon(load_app_icon()),
