@@ -450,8 +450,13 @@ fn resolve_icon_path(value: &str) -> Option<PathBuf> {
         return None;
     }
     // Direct path
-    let p = if value.starts_with('~') {
-        dirs_next().join(&value[2..])
+    let p = if let Some(rest) = value.strip_prefix('~') {
+        // strip_prefix (not a fixed &value[2..] byte slice) handles a bare
+        // "~", a "~" not followed by '/', and a non-ASCII byte immediately
+        // after '~' without panicking on an out-of-bounds or non-char-boundary
+        // index -all of which a malformed Icon= value in a .desktop file can
+        // produce.
+        dirs_next().join(rest.trim_start_matches('/'))
     } else {
         PathBuf::from(value)
     };
@@ -496,6 +501,52 @@ fn dirs_next() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/root"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression tests for a panic previously triggered by a malformed
+    // Icon= value in a .desktop file (a fixed &value[2..] byte slice paniced
+    // on "byte index 2 out of bounds" / "not a char boundary"). None of
+    // these paths exist on a test machine, so each call falls through to
+    // resolve_icon_path's fallback searches and returns None -the only
+    // thing under test is that none of them panic.
+
+    #[test]
+    fn bare_tilde_does_not_panic() {
+        // "~" strips to an empty remainder, which joins to the home
+        // directory itself -that directory exists, so this legitimately
+        // resolves to Some(home) rather than None. The property under test
+        // is "doesn't panic", not any particular Some/None outcome.
+        let _ = resolve_icon_path("~");
+    }
+
+    #[test]
+    fn tilde_followed_by_multibyte_char_does_not_panic() {
+        // 'é' is 2 UTF-8 bytes starting at byte offset 1 -byte index 2 (the
+        // old &value[2..]) lands mid-character here, not on a char boundary.
+        assert_eq!(resolve_icon_path("~é"), None);
+    }
+
+    #[test]
+    fn tilde_with_no_separator_does_not_panic() {
+        assert_eq!(resolve_icon_path("~foo.png"), None);
+    }
+
+    #[test]
+    fn well_formed_tilde_path_still_resolves_without_panicking() {
+        // No such file exists, so this exercises the same strip_prefix +
+        // trim_start_matches('/') path a real "~/icons/foo.png" value would,
+        // without depending on HOME or any file actually existing.
+        assert_eq!(resolve_icon_path("~/nonexistent-icon-xyz.png"), None);
+    }
+
+    #[test]
+    fn empty_value_returns_none() {
+        assert_eq!(resolve_icon_path(""), None);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
