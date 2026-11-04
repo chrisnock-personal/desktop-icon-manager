@@ -157,7 +157,7 @@ impl DesktopEntry {
         let new_content = new_lines.join("\n") + "\n";
         fs::write(&self.path, new_content).map_err(|e| format!("Write error: {e}"))?;
         self.modified = false;
-        self.status = Some("✓ Saved".to_string());
+        self.status = Some("✔ Saved".to_string());
         Ok(())
     }
 }
@@ -590,7 +590,7 @@ impl eframe::App for IconManagerApp {
                             .hint_text("Filter apps…")
                             .desired_width(200.0),
                     );
-                    if !self.filter.is_empty() && ui.small_button("✕").clicked() {
+                    if !self.filter.is_empty() && ui.small_button("✖").clicked() {
                         self.filter.clear();
                     }
 
@@ -750,17 +750,20 @@ impl IconManagerApp {
         );
         ui.add_space(4.0);
 
-        // Column headers
-        egui::Grid::new("header_grid")
-            .num_columns(4)
-            .min_col_width(10.0)
-            .show(ui, |ui| {
-                ui.label(RichText::new("Icon").size(11.0).color(Color32::from_rgb(80, 90, 140)));
-                ui.label(RichText::new("Application").size(11.0).color(Color32::from_rgb(80, 90, 140)));
-                ui.label(RichText::new("Icon Value").size(11.0).color(Color32::from_rgb(80, 90, 140)));
-                ui.label(RichText::new("Flags").size(11.0).color(Color32::from_rgb(80, 90, 140)));
-                ui.end_row();
-            });
+        // Column headers -laid out with the same widths and spacing as the
+        // rows below (6px row margin, 32px icon, 6px gap, two 180px columns)
+        // so each heading sits over its column.
+        let header = |text: &str| {
+            RichText::new(text).size(11.0).color(Color32::from_rgb(80, 90, 140))
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            ui.add_sized(Vec2::new(32.0, 14.0), egui::Label::new(header("Icon")));
+            ui.add_space(6.0);
+            ui.add_sized(Vec2::new(180.0, 14.0), egui::Label::new(header("Application")));
+            ui.add_sized(Vec2::new(180.0, 14.0), egui::Label::new(header("Icon Value")));
+            ui.label(header("Flags"));
+        });
 
         ui.separator();
 
@@ -824,7 +827,7 @@ impl IconManagerApp {
 
                             // Name
                             let name_label = if is_modified {
-                                RichText::new(format!("● {entry_name}"))
+                                RichText::new(format!("• {entry_name}"))
                                     .color(Color32::from_rgb(180, 100, 20))
                                     .size(13.0)
                             } else {
@@ -914,7 +917,15 @@ impl IconManagerApp {
 
         // App name
         ui.label(RichText::new("Application").size(11.0).color(Color32::from_rgb(80, 95, 140)));
-        ui.label(RichText::new(&entry_name).size(14.0).strong());
+        // Explicit colour: .strong() alone uses the theme's strong-text colour,
+        // which is the active-widget foreground (white), so the name was
+        // invisible on the white panel.
+        ui.label(
+            RichText::new(&entry_name)
+                .size(14.0)
+                .strong()
+                .color(Color32::from_rgb(30, 35, 55)),
+        );
         ui.add_space(4.0);
 
         // File path
@@ -1017,7 +1028,7 @@ impl IconManagerApp {
                             self.entries[sel].icon_value = theme_name.clone();
                             self.entries[sel].modified = true;
                             self.entries[sel].status = Some(
-                                format!("✓ Icon set to \"{theme_name}\" -save to apply")
+                                format!("✔ Icon set to \"{theme_name}\" -save to apply")
                             );
                             self.global_status = format!(
                                 "Installed icon as theme name \"{}\" -dock & launcher will update on save",
@@ -1025,7 +1036,7 @@ impl IconManagerApp {
                             );
                         }
                         Err(e) => {
-                            self.entries[sel].status = Some(format!("✗ {e}"));
+                            self.entries[sel].status = Some(format!("✖ {e}"));
                         }
                     }
                 }
@@ -1115,9 +1126,9 @@ impl IconManagerApp {
         // ── Status message ────────────────────────────────────────────────────
         if let Some(ref s) = self.entries[sel].status.clone() {
             ui.add_space(8.0);
-            let color = if s.starts_with('✓') {
+            let color = if s.starts_with('✔') {
                 Color32::from_rgb(20, 140, 70)
-            } else if s.starts_with('✗') {
+            } else if s.starts_with('✖') {
                 Color32::from_rgb(190, 40, 40)
             } else {
                 Color32::from_rgb(150, 110, 20)
@@ -1145,7 +1156,7 @@ impl IconManagerApp {
                         self.global_status = format!("Saved: {}", self.entries[sel].name);
                     }
                     Err(e) => {
-                        self.entries[sel].status = Some(format!("✗ {e}"));
+                        self.entries[sel].status = Some(format!("✖ {e}"));
                     }
                 }
             }
@@ -1171,7 +1182,7 @@ impl IconManagerApp {
 
         // Close detail panel
         if ui
-            .button(RichText::new("✕  Close").size(12.0).color(Color32::from_rgb(160, 60, 60)))
+            .button(RichText::new("✖  Close").size(12.0).color(Color32::from_rgb(160, 60, 60)))
             .clicked()
         {
             self.selected = None;
