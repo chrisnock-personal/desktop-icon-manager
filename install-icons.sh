@@ -5,7 +5,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSETS_DIR="$SCRIPT_DIR/assets"
-BINARY="$SCRIPT_DIR/target/release/desktop-icon-manager"
+# A release download has the binary next to this script; a source checkout
+# has it under target/release after `cargo build --release`.
+if [ -f "$SCRIPT_DIR/desktop-icon-manager" ]; then
+    BINARY="$SCRIPT_DIR/desktop-icon-manager"
+else
+    BINARY="$SCRIPT_DIR/target/release/desktop-icon-manager"
+fi
 INSTALL_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 HICOLOR="$HOME/.local/share/icons/hicolor"

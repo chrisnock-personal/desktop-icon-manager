@@ -1,5 +1,7 @@
 # Desktop Icon Manager
 
+[![CI](https://github.com/chrisnock-personal/desktop-icon-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/chrisnock-personal/desktop-icon-manager/actions/workflows/ci.yml)
+
 A native Linux GUI application for managing icons in `.desktop` application
 entries -including full support for Chrome PWA apps.
 
@@ -122,8 +124,23 @@ app entries.
 
 ## Build & Install
 
+### Download a release
+
+Each [release](https://github.com/chrisnock-personal/desktop-icon-manager/releases)
+has a prebuilt x86-64 Linux binary. Extract it and run the install script,
+which copies the binary to `~/.local/bin` and adds the app icon and a menu
+entry:
+
 ```bash
-# Extract the tarball, then:
+tar -xzf desktop-icon-manager-*-x86_64-linux.tar.gz
+cd desktop-icon-manager-*-x86_64-linux
+./install-icons.sh
+```
+
+### Build from source
+
+```bash
+# From a clone of this repo:
 chmod +x build.sh
 ./build.sh
 ```
