@@ -6,6 +6,9 @@ entries -including full support for Chrome PWA apps.
 Built with **Rust** + **[egui](https://github.com/emilk/egui)** (pure-Rust
 immediate mode GUI, no GTK/Qt dependency at runtime).
 
+For an illustrated tour of every feature, see the
+[project overview](https://github.com/chrisnock-personal/project-overviews/blob/main/desktop-icon-manager/README.md).
+
 ---
 
 ## Features
