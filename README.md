@@ -33,12 +33,22 @@ For an illustrated tour of every feature, see the
 
 ## Screenshots
 
-<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/0dfbc44d-912b-401e-8e3c-229ef1ca0b0e" /> <br>
-<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/b4501d16-168f-434b-86a2-e4847630e827" /><br>
-<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/db66bb59-c6b3-4970-8407-19b6a519ba7e" /><br>
-<img width="1107" height="740" alt="Image" src="https://github.com/user-attachments/assets/5898b5fd-f8da-4c91-988e-b00672713131" /><br>
-<img width="493" height="205" alt="Image" src="https://github.com/user-attachments/assets/a43bddf7-d705-4ff2-9be2-e3f78d934dab" /><br>
-<img width="256" height="83" alt="Image" src="https://github.com/user-attachments/assets/5885c1c4-ebad-4527-81f3-c259c2882f6b" /> <br>
+![Grid view: every application as an icon card](docs/images/grid.png)
+*Grid view, with filters for web apps and unsaved changes.*
+
+![The Chrome web apps with Apple Music open in the edit panel](docs/images/web-apps.png)
+*Editing an entry: icon preview, `Icon=` value, and the Chrome web app settings.*
+
+![List view in the dark theme, searching for "settings"](docs/images/list-dark.png)
+*List view in the dark theme.*
+
+![Google Chat after "Fill from app ID", with the change waiting to be saved](docs/images/pwa-fix.png)
+*Fixing a Chrome PWA's `StartupWMClass` in one click.*
+
+The result in GNOME's app grid and dock:
+
+<img width="493" height="205" alt="Custom icons in the GNOME app grid" src="https://github.com/user-attachments/assets/a43bddf7-d705-4ff2-9be2-e3f78d934dab" /><br>
+<img width="256" height="83" alt="A custom icon in the GNOME dock" src="https://github.com/user-attachments/assets/5885c1c4-ebad-4527-81f3-c259c2882f6b" />
 
 ---
 
