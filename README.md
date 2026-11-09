@@ -18,7 +18,7 @@ For an illustrated tour of every feature, see the
 | Feature | Details |
 |---|---|
 | **Discover .desktop files** | Scans `~/.local/share/applications`, `/usr/share/applications`, and `/usr/local/share/applications` |
-| **Live icon preview** | Thumbnails rendered inline for PNG/JPG/ICO/BMP/WebP/SVG icons |
+| **Live icon preview** | Previews PNG, JPG, ICO, BMP, WebP and SVG icons, finding theme names the way the desktop does: your own icons, then the active icon theme (e.g. Adwaita) and the themes it inherits from, then hicolor and pixmaps. Symbolic icons are tinted to suit the theme |
 | **Upload icons** | Native file picker → copied to `~/Pictures/Icons/` and installed into the XDG icon theme |
 | **Dock & launcher compatible** | Icons installed at all standard sizes (16–512px) into `~/.local/share/icons/hicolor/`; `Icon=` is set to a theme name, not a file path |
 | **Edit Icon= value** | Replace the icon value manually or via the file picker |

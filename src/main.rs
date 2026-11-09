@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod icon_data;
+mod icons;
 mod theme;
 
 use theme::Palette;
@@ -216,6 +217,14 @@ enum ViewMode {
     List,
 }
 
+/// An icon preview uploaded to the GPU.
+#[derive(Clone)]
+struct IconTexture {
+    tex: egui::TextureHandle,
+    /// A single-colour symbolic icon, stored as a white mask to be tinted
+    symbolic: bool,
+}
+
 #[derive(Default)]
 struct IconManagerApp {
     entries: Vec<DesktopEntry>,
@@ -235,8 +244,10 @@ struct IconManagerApp {
     palette: Palette,
     /// The app's own icon, shown in the header
     logo: Option<egui::TextureHandle>,
-    /// Cached icon textures: icon_path_string → TextureHandle
-    icon_textures: HashMap<String, egui::TextureHandle>,
+    /// Decoded icon previews by Icon= value; None caches "no preview"
+    icon_textures: HashMap<String, Option<IconTexture>>,
+    /// Every icon in the desktop's icon themes, for resolving Icon= names
+    icon_index: icons::IconIndex,
     /// Icons folder (absolute path): default ~/Pictures/Icons, user-editable
     icons_dir: PathBuf,
     /// Editable text buffer for the icons dir path field
@@ -298,6 +309,8 @@ impl IconManagerApp {
     }
 
     fn refresh_entries(&mut self) {
+        self.icon_index = icons::IconIndex::for_desktop();
+        self.icon_textures.clear();
         self.entries.clear();
         self.selected = None;
         self.global_status = String::new();
@@ -441,151 +454,33 @@ impl IconManagerApp {
         &mut self,
         ctx: &egui::Context,
         icon_value: &str,
-    ) -> Option<egui::TextureHandle> {
+    ) -> Option<IconTexture> {
         if icon_value.is_empty() {
             return None;
         }
-        if let Some(tex) = self.icon_textures.get(icon_value) {
-            return Some(tex.clone());
+        if let Some(cached) = self.icon_textures.get(icon_value) {
+            return cached.clone();
         }
-
-        // Resolve path
-        let path = resolve_icon_path(icon_value)?;
-        let img = image::open(&path).ok()?;
-        let img = img.resize(
-            ICON_TEXTURE_SIZE,
-            ICON_TEXTURE_SIZE,
-            image::imageops::FilterType::Lanczos3,
-        );
-        let rgba = img.to_rgba8();
-        let size = [rgba.width() as usize, rgba.height() as usize];
-        let pixels = rgba.into_raw();
-        let color_image =
-            egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
-        let tex = ctx.load_texture(icon_value, color_image, egui::TextureOptions::LINEAR);
-        self.icon_textures.insert(icon_value.to_string(), tex.clone());
-        Some(tex)
+        let loaded = icons::resolve_icon_path(icon_value, &self.icon_index)
+            .and_then(|path| icons::decode(&path))
+            .map(|icon| IconTexture {
+                tex: ctx.load_texture(icon_value, icon.image, egui::TextureOptions::LINEAR),
+                symbolic: icon.symbolic,
+            });
+        self.icon_textures.insert(icon_value.to_string(), loaded.clone());
+        loaded
     }
 }
 
-/// Resolve an icon value to an actual file path (absolute or ~-prefixed).
-/// Resolve an icon value to a file path for in-app preview rendering.
-/// Search order (largest→smallest for best preview quality):
-///   1. Direct path (absolute or legacy ~ prefix)
-///   2. User-local hicolor theme  (~/.local/share/icons/hicolor/…)
-///   3. User pixmaps              (~/.local/share/pixmaps)
-///   4. System hicolor theme      (/usr/share/icons/hicolor/…)
-///   5. System pixmaps            (/usr/share/pixmaps)
-fn resolve_icon_path(value: &str) -> Option<PathBuf> {
-    if value.is_empty() {
-        return None;
-    }
-    // Direct path
-    let p = if let Some(rest) = value.strip_prefix('~') {
-        // strip_prefix (not a fixed &value[2..] byte slice) handles a bare
-        // "~", a "~" not followed by '/', and a non-ASCII byte immediately
-        // after '~' without panicking on an out-of-bounds or non-char-boundary
-        // index -all of which a malformed Icon= value in a .desktop file can
-        // produce.
-        dirs_next().join(rest.trim_start_matches('/'))
-    } else {
-        PathBuf::from(value)
-    };
-    if p.exists() {
-        return Some(p);
-    }
-
-    let home = dirs_next();
-    let local_hicolor = home.join(".local/share/icons/hicolor");
-    let local_pixmaps = home.join(".local/share/pixmaps");
-    let sizes = ["256x256", "128x128", "64x64", "48x48", "scalable", "32x32", "16x16"];
-    let exts  = ["png", "svg", "xpm"];
-
-    // User-local hicolor (where we install uploaded icons)
-    for size in &sizes {
-        for ext in &exts {
-            let c = local_hicolor.join(format!("{size}/apps/{value}.{ext}"));
-            if c.exists() { return Some(c); }
-        }
-    }
-    // User pixmaps
-    for ext in &exts {
-        let c = local_pixmaps.join(format!("{value}.{ext}"));
-        if c.exists() { return Some(c); }
-    }
-    // System hicolor
-    for size in &sizes {
-        for ext in &exts {
-            let c = PathBuf::from(format!("/usr/share/icons/hicolor/{size}/apps/{value}.{ext}"));
-            if c.exists() { return Some(c); }
-        }
-    }
-    // System pixmaps
-    for ext in &exts {
-        let c = PathBuf::from(format!("/usr/share/pixmaps/{value}.{ext}"));
-        if c.exists() { return Some(c); }
-    }
-    None
-}
-
-fn dirs_next() -> PathBuf {
+pub(crate) fn dirs_next() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/root"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Regression tests for a panic previously triggered by a malformed
-    // Icon= value in a .desktop file (a fixed &value[2..] byte slice paniced
-    // on "byte index 2 out of bounds" / "not a char boundary"). None of
-    // these paths exist on a test machine, so each call falls through to
-    // resolve_icon_path's fallback searches and returns None -the only
-    // thing under test is that none of them panic.
-
-    #[test]
-    fn bare_tilde_does_not_panic() {
-        // "~" strips to an empty remainder, which joins to the home
-        // directory itself -that directory exists, so this legitimately
-        // resolves to Some(home) rather than None. The property under test
-        // is "doesn't panic", not any particular Some/None outcome.
-        let _ = resolve_icon_path("~");
-    }
-
-    #[test]
-    fn tilde_followed_by_multibyte_char_does_not_panic() {
-        // 'é' is 2 UTF-8 bytes starting at byte offset 1 -byte index 2 (the
-        // old &value[2..]) lands mid-character here, not on a char boundary.
-        assert_eq!(resolve_icon_path("~é"), None);
-    }
-
-    #[test]
-    fn tilde_with_no_separator_does_not_panic() {
-        assert_eq!(resolve_icon_path("~foo.png"), None);
-    }
-
-    #[test]
-    fn well_formed_tilde_path_still_resolves_without_panicking() {
-        // No such file exists, so this exercises the same strip_prefix +
-        // trim_start_matches('/') path a real "~/icons/foo.png" value would,
-        // without depending on HOME or any file actually existing.
-        assert_eq!(resolve_icon_path("~/nonexistent-icon-xyz.png"), None);
-    }
-
-    #[test]
-    fn empty_value_returns_none() {
-        assert_eq!(resolve_icon_path(""), None);
-    }
-}
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Drawing helpers
 // ──────────────────────────────────────────────────────────────────────────────
-
-/// Size icons are decoded at: large enough for the detail panel's hero icon.
-const ICON_TEXTURE_SIZE: u32 = 128;
 
 fn text(s: impl Into<String>, size: f32, color: Color32) -> RichText {
     RichText::new(s).size(size).color(color)
@@ -678,19 +573,25 @@ fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
 
 /// Paint an icon texture fitted (aspect preserved) into `rect`, or a coloured
 /// tile with the app's initial when there is no preview.
-fn paint_icon(ui: &egui::Ui, p: &Palette, rect: Rect, tex: Option<&egui::TextureHandle>, name: &str) {
+fn paint_icon(ui: &egui::Ui, p: &Palette, rect: Rect, icon: Option<&IconTexture>, name: &str) {
     let painter = ui.painter();
-    match tex {
-        Some(tex) => {
-            let size = tex.size_vec2();
-            let scale = (rect.width() / size.x).min(rect.height() / size.y);
-            let fitted = Rect::from_center_size(rect.center(), size * scale);
-            painter.image(
-                tex.id(),
-                fitted,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+    let fit = |tex: &egui::TextureHandle, rect: Rect| {
+        let size = tex.size_vec2();
+        let scale = (rect.width() / size.x).min(rect.height() / size.y);
+        Rect::from_center_size(rect.center(), size * scale)
+    };
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    match icon {
+        // Symbolic icons are plain shapes: draw them on a tinted tile, in
+        // the tile's colour, so they read like app icons in both themes.
+        Some(icon) if icon.symbolic => {
+            let (fg, bg) = p.tint_for(name);
+            painter.rect_filled(rect, Rounding::same(rect.width() * 0.24), bg);
+            let inner = rect.shrink(rect.width() * 0.24);
+            painter.image(icon.tex.id(), fit(&icon.tex, inner), uv, fg);
+        }
+        Some(icon) => {
+            painter.image(icon.tex.id(), fit(&icon.tex, rect), uv, Color32::WHITE);
         }
         None => {
             let (fg, bg) = p.tint_for(name);
@@ -1550,10 +1451,10 @@ impl IconManagerApp {
 
         match self.import_icon(&src_path) {
             Ok(theme_name) => {
-                // Invalidate texture cache so the preview refreshes
-                let old_key = self.entries[sel].icon_value.clone();
-                self.icon_textures.remove(&old_key);
-                self.icon_textures.remove(&theme_name);
+                // The new icon is now in the theme: re-index and drop
+                // cached previews so it (and anything it replaced) reloads.
+                self.icon_index = icons::IconIndex::for_desktop();
+                self.icon_textures.clear();
 
                 self.entries[sel].icon_value = theme_name.clone();
                 self.entries[sel].modified = true;
