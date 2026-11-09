@@ -1,10 +1,18 @@
 use eframe::egui;
-use egui::{Color32, RichText, ScrollArea, Sense, Stroke, Vec2};
+use egui::text::LayoutJob;
+use egui::{
+    Align, Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Rounding, ScrollArea,
+    Sense, Stroke, Vec2,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 mod icon_data;
+mod theme;
+
+use theme::Palette;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Data structures
@@ -191,6 +199,23 @@ fn detect_chrome_pwa(filename: &str, icon_value: &str) -> (bool, Option<String>)
 // Application state
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Which entries the list shows.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Filter {
+    #[default]
+    All,
+    Pwa,
+    Unsaved,
+}
+
+/// How the entries are laid out.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ViewMode {
+    #[default]
+    Grid,
+    List,
+}
+
 #[derive(Default)]
 struct IconManagerApp {
     entries: Vec<DesktopEntry>,
@@ -198,10 +223,18 @@ struct IconManagerApp {
     selected: Option<usize>,
     /// Search / filter string
     filter: String,
-    /// Global status bar message
+    /// Global status message (shown in the toolbar)
     global_status: String,
-    /// Whether to show only Chrome PWA entries
-    show_only_pwa: bool,
+    /// Which subset of entries to show
+    filter_mode: Filter,
+    /// Grid of cards or a compact list
+    view: ViewMode,
+    /// Dark theme active
+    dark: bool,
+    /// Colours for the active theme
+    palette: Palette,
+    /// The app's own icon, shown in the header
+    logo: Option<egui::TextureHandle>,
     /// Cached icon textures: icon_path_string → TextureHandle
     icon_textures: HashMap<String, egui::TextureHandle>,
     /// Icons folder (absolute path): default ~/Pictures/Icons, user-editable
@@ -214,36 +247,27 @@ struct IconManagerApp {
     apps_dirs: Vec<PathBuf>,
 }
 
+impl Default for Palette {
+    fn default() -> Self {
+        Palette::light()
+    }
+}
+
 impl IconManagerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // ── Light theme ──────────────────────────────────────────────────
-        let mut visuals = egui::Visuals::light();
-        visuals.window_rounding        = egui::Rounding::same(10.0);
-        // Panel backgrounds
-        visuals.panel_fill             = Color32::from_rgb(245, 247, 252); // near-white blue tint
-        visuals.window_fill            = Color32::from_rgb(255, 255, 255);
-        // Widget states
-        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(235, 239, 248);
-        visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0, Color32::from_rgb(210, 216, 232));
-        visuals.widgets.inactive.bg_fill   = Color32::from_rgb(225, 231, 246);
-        visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, Color32::from_rgb(195, 205, 228));
-        visuals.widgets.hovered.bg_fill    = Color32::from_rgb(210, 222, 248);
-        visuals.widgets.hovered.bg_stroke  =
-            egui::Stroke::new(1.5, Color32::from_rgb(100, 149, 237));
-        visuals.widgets.active.bg_fill     = Color32::from_rgb(100, 149, 237);
-        visuals.widgets.active.fg_stroke   =
-            egui::Stroke::new(2.0, Color32::WHITE);
-        // Text
-        visuals.override_text_color = Some(Color32::from_rgb(30, 35, 55));
-        // Selection
-        visuals.selection.bg_fill = Color32::from_rgb(180, 205, 250);
-        visuals.selection.stroke  = egui::Stroke::new(1.0, Color32::from_rgb(90, 140, 230));
-        // Separators / faint lines
-        visuals.widgets.noninteractive.fg_stroke =
-            egui::Stroke::new(1.0, Color32::from_rgb(200, 208, 228));
-        cc.egui_ctx.set_visuals(visuals);
+        theme::install_fonts(&cc.egui_ctx);
+        let dark = theme::system_prefers_dark(cc);
+        let palette = Palette::for_mode(dark);
+        theme::apply(&cc.egui_ctx, &palette);
+
+        let logo = Some(cc.egui_ctx.load_texture(
+            "app-logo",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [icon_data::ICON_WIDTH as usize, icon_data::ICON_HEIGHT as usize],
+                icon_data::ICON_RGBA,
+            ),
+            egui::TextureOptions::LINEAR,
+        ));
 
         let home = dirs_next();
         // Scan local first (higher priority), then system-wide
@@ -264,6 +288,9 @@ impl IconManagerApp {
             apps_dirs,
             icons_dir,
             icons_dir_input,
+            dark,
+            palette,
+            logo,
             ..Default::default()
         };
         app.refresh_entries();
@@ -425,7 +452,11 @@ impl IconManagerApp {
         // Resolve path
         let path = resolve_icon_path(icon_value)?;
         let img = image::open(&path).ok()?;
-        let img = img.resize(48, 48, image::imageops::FilterType::Lanczos3);
+        let img = img.resize(
+            ICON_TEXTURE_SIZE,
+            ICON_TEXTURE_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        );
         let rgba = img.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
         let pixels = rgba.into_raw();
@@ -550,101 +581,389 @@ mod tests {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Drawing helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Size icons are decoded at: large enough for the detail panel's hero icon.
+const ICON_TEXTURE_SIZE: u32 = 128;
+
+fn text(s: impl Into<String>, size: f32, color: Color32) -> RichText {
+    RichText::new(s).size(size).color(color)
+}
+
+fn bold_text(s: impl Into<String>, size: f32, color: Color32) -> RichText {
+    RichText::new(s).size(size).color(color).family(theme::bold())
+}
+
+/// Small upper-case label above a group of controls.
+fn section_label(ui: &mut egui::Ui, p: &Palette, s: &str) {
+    ui.label(bold_text(s.to_uppercase(), 10.5, p.text_faint));
+}
+
+/// Filled accent button for the main action.
+fn primary_button(p: &Palette, label: &str) -> egui::Button<'static> {
+    egui::Button::new(bold_text(label, 13.0, p.on_accent))
+        .fill(p.accent)
+        .stroke(Stroke::NONE)
+        .rounding(Rounding::same(8.0))
+}
+
+/// Outlined button for secondary actions.
+fn secondary_button(p: &Palette, label: &str) -> egui::Button<'static> {
+    egui::Button::new(text(label, 13.0, p.text))
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0_f32, p.border_strong))
+        .rounding(Rounding::same(8.0))
+}
+
+/// Square, borderless button holding a single glyph.
+fn icon_button(ui: &mut egui::Ui, p: &Palette, glyph: &str, tip: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(text(glyph, 15.0, p.text_muted))
+            .fill(p.surface_alt)
+            .stroke(Stroke::NONE)
+            .rounding(Rounding::same(8.0))
+            .min_size(Vec2::splat(32.0)),
+    )
+    .on_hover_text(tip)
+    .on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Lay out a single- or multi-line piece of text, ending in "…" when it
+/// doesn't fit in `max_rows` lines of `width`.
+fn layout_text(
+    ui: &egui::Ui,
+    s: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+    max_rows: usize,
+    halign: Align,
+) -> Arc<egui::Galley> {
+    let mut job = LayoutJob::simple(s.to_owned(), font, color, width);
+    job.wrap.max_rows = max_rows;
+    job.wrap.break_anywhere = max_rows == 1;
+    job.wrap.overflow_character = Some('…');
+    job.halign = halign;
+    ui.fonts(|f| f.layout_job(job))
+}
+
+/// Paint a rounded "pill" badge with its top-left corner at `pos` and
+/// return its rect.
+fn paint_pill(ui: &egui::Ui, pos: Pos2, label: &str, fg: Color32, bg: Color32) -> Rect {
+    let galley = layout_text(
+        ui,
+        label,
+        FontId::new(10.0, theme::bold()),
+        fg,
+        f32::INFINITY,
+        1,
+        Align::LEFT,
+    );
+    let pad = egui::vec2(7.0, 2.5);
+    let rect = Rect::from_min_size(pos, galley.size() + pad * 2.0);
+    let painter = ui.painter();
+    painter.rect_filled(rect, Rounding::same(rect.height() / 2.0), bg);
+    painter.galley(rect.min + pad, galley, fg);
+    rect
+}
+
+/// Width a pill with this label will take, for right-aligning a row of them.
+fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
+    layout_text(ui, label, FontId::new(10.0, theme::bold()), Color32::WHITE, f32::INFINITY, 1, Align::LEFT)
+        .size()
+        .x
+        + 14.0
+}
+
+/// Paint an icon texture fitted (aspect preserved) into `rect`, or a coloured
+/// tile with the app's initial when there is no preview.
+fn paint_icon(ui: &egui::Ui, p: &Palette, rect: Rect, tex: Option<&egui::TextureHandle>, name: &str) {
+    let painter = ui.painter();
+    match tex {
+        Some(tex) => {
+            let size = tex.size_vec2();
+            let scale = (rect.width() / size.x).min(rect.height() / size.y);
+            let fitted = Rect::from_center_size(rect.center(), size * scale);
+            painter.image(
+                tex.id(),
+                fitted,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            let (fg, bg) = p.tint_for(name);
+            painter.rect_filled(rect, Rounding::same(rect.width() * 0.24), bg);
+            let initial = name
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".into());
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                initial,
+                FontId::new(rect.height() * 0.46, theme::bold()),
+                fg,
+            );
+        }
+    }
+}
+
+/// Drop shadow under a card.
+fn paint_shadow(ui: &egui::Ui, p: &Palette, rect: Rect, rounding: f32, lift: f32) {
+    let shadow = egui::epaint::Shadow {
+        offset: egui::vec2(0.0, lift),
+        blur: lift * 3.0,
+        spread: 0.0,
+        color: p.shadow,
+    };
+    ui.painter().add(shadow.tessellate(rect, Rounding::same(rounding)));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // eframe App implementation
 // ──────────────────────────────────────────────────────────────────────────────
 
 impl eframe::App for IconManagerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── Top panel: toolbar ───────────────────────────────────────────────
-        egui::TopBottomPanel::top("toolbar")
+        self.handle_shortcuts(ctx);
+        self.draw_header(ctx);
+        self.draw_status_bar(ctx);
+
+        if let Some(sel) = self.selected.filter(|&s| s < self.entries.len()) {
+            let p = self.palette;
+            egui::SidePanel::right("detail_panel")
+                .default_width(380.0)
+                .min_width(320.0)
+                .max_width(560.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(p.surface)
+                        .stroke(Stroke::new(1.0_f32, p.border)),
+                )
+                .show(ctx, |ui| {
+                    self.draw_detail_panel(ui, ctx, sel);
+                });
+        }
+
+        egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(255, 255, 255))
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                    .fill(self.palette.bg)
+                    .inner_margin(egui::Margin {
+                        left: 20.0,
+                        right: 12.0,
+                        top: 16.0,
+                        bottom: 0.0,
+                    }),
             )
             .show(ctx, |ui| {
+                self.draw_entries(ui, ctx);
+            });
+    }
+}
+
+impl IconManagerApp {
+    fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
+        self.dark = dark;
+        self.palette = Palette::for_mode(dark);
+        theme::apply(ctx, &self.palette);
+    }
+
+    /// Ctrl+S saves the open entry; Escape closes the detail panel.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let Some(sel) = self.selected.filter(|&s| s < self.entries.len()) else {
+            return;
+        };
+        let (save, close) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::S),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if save && self.entries[sel].modified {
+            self.save_entry(sel);
+        }
+        if close && ctx.memory(|m| m.focused().is_none()) {
+            self.selected = None;
+        }
+    }
+
+    fn save_entry(&mut self, sel: usize) {
+        match self.entries[sel].save() {
+            Ok(()) => self.global_status = format!("Saved {}", self.entries[sel].name),
+            Err(e) => self.entries[sel].status = Some(format!("✖ {e}")),
+        }
+    }
+
+    fn discard_entry(&mut self, sel: usize) {
+        let path = self.entries[sel].path.clone();
+        if let Some(fresh) = DesktopEntry::load(path) {
+            self.entries[sel] = fresh;
+        }
+    }
+
+    fn matches(&self, e: &DesktopEntry, needle: &str) -> bool {
+        let in_subset = match self.filter_mode {
+            Filter::All => true,
+            Filter::Pwa => e.is_chrome_pwa,
+            Filter::Unsaved => e.modified,
+        };
+        in_subset
+            && (needle.is_empty()
+                || e.name.to_lowercase().contains(needle)
+                || e.icon_value.to_lowercase().contains(needle))
+    }
+
+    // ── Header: title, search, filters ───────────────────────────────────────
+
+    fn draw_header(&mut self, ctx: &egui::Context) {
+        let p = self.palette;
+        egui::TopBottomPanel::top("header")
+            .frame(
+                egui::Frame::none()
+                    .fill(p.surface)
+                    .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
+            )
+            .show(ctx, |ui| {
+                // Row 1: logo, title, view & theme controls
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("🖥  Desktop Icon Manager")
-                            .size(18.0)
-                            .color(Color32::from_rgb(60, 100, 210))
-                            .strong(),
-                    );
-                    ui.add_space(16.0);
+                    if let Some(logo) = &self.logo {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                        ui.painter().image(
+                            logo.id(),
+                            rect,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(bold_text("Desktop Icon Manager", 17.0, p.text));
+                        let pwas = self.entries.iter().filter(|e| e.is_chrome_pwa).count();
+                        ui.label(text(
+                            format!("{} applications  ·  {} web apps", self.entries.len(), pwas),
+                            12.0,
+                            p.text_muted,
+                        ));
+                    });
 
-                    if ui
-                        .button(RichText::new("⟳  Refresh").size(13.0))
-                        .on_hover_text("Reload all .desktop files")
-                        .clicked()
-                    {
-                        self.refresh_entries();
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let (glyph, tip) = if self.dark {
+                            ("☀", "Switch to light theme")
+                        } else {
+                            ("🌙", "Switch to dark theme")
+                        };
+                        if icon_button(ui, &p, glyph, tip).clicked() {
+                            self.set_dark(ctx, !self.dark);
+                        }
+                        if icon_button(ui, &p, "⟳", "Reload all .desktop files").clicked() {
+                            self.refresh_entries();
+                        }
+                        ui.add_space(4.0);
+                        // Right-to-left layout: List is added first so it
+                        // ends up on the right, reading "Grid | List".
+                        segmented(ui, &p, &mut self.view, &[(ViewMode::List, "List"), (ViewMode::Grid, "Grid")]);
+                    });
+                });
+
+                ui.add_space(12.0);
+
+                // Row 2: search box and filter chips
+                ui.horizontal(|ui| {
+                    egui::Frame::none()
+                        .fill(p.surface_alt)
+                        .stroke(Stroke::new(1.0_f32, p.border))
+                        .rounding(Rounding::same(10.0))
+                        .inner_margin(egui::Margin::symmetric(10.0, 3.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(text("🔍", 13.0, p.text_faint));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.filter)
+                                        .frame(false)
+                                        .hint_text(text("Search apps or icon names…", 13.0, p.text_faint))
+                                        .font(FontId::proportional(13.5))
+                                        .desired_width(260.0),
+                                );
+                                let clear = egui::Button::new(text("✖", 11.0, p.text_faint)).frame(false);
+                                if ui
+                                    .add_visible(!self.filter.is_empty(), clear)
+                                    .on_hover_text("Clear search")
+                                    .clicked()
+                                {
+                                    self.filter.clear();
+                                }
+                            });
+                        });
+
+                    ui.add_space(8.0);
+
+                    let pwas = self.entries.iter().filter(|e| e.is_chrome_pwa).count();
+                    let unsaved = self.entries.iter().filter(|e| e.modified).count();
+                    for (mode, label, count) in [
+                        (Filter::All, "All", self.entries.len()),
+                        (Filter::Pwa, "Web apps", pwas),
+                        (Filter::Unsaved, "Unsaved", unsaved),
+                    ] {
+                        let on = self.filter_mode == mode;
+                        let (fg, fill, stroke) = if on {
+                            (p.accent, p.accent_soft, p.accent)
+                        } else {
+                            (p.text_muted, p.surface, p.border)
+                        };
+                        let label = if on {
+                            bold_text(format!("{label}  {count}"), 12.5, fg)
+                        } else {
+                            text(format!("{label}  {count}"), 12.5, fg)
+                        };
+                        let chip = egui::Button::new(label)
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0_f32, stroke))
+                            .rounding(Rounding::same(15.0))
+                            .min_size(Vec2::new(0.0, 30.0));
+                        if ui.add(chip).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            self.filter_mode = mode;
+                        }
                     }
 
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    ui.label("🔍");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter)
-                            .hint_text("Filter apps…")
-                            .desired_width(200.0),
-                    );
-                    if !self.filter.is_empty() && ui.small_button("✖").clicked() {
-                        self.filter.clear();
-                    }
-
-                    ui.add_space(8.0);
-                    ui.checkbox(&mut self.show_only_pwa, "Chrome PWAs only");
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(&self.global_status)
-                                .size(11.0)
-                                .color(Color32::from_rgb(30, 130, 80)),
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(text(&self.global_status, 12.0, p.text_muted))
+                                .truncate(true),
                         );
                     });
                 });
             });
+    }
 
-        // ── Bottom status bar ────────────────────────────────────────────────
+    // ── Status bar: icons folder & scanned dirs ──────────────────────────────
+
+    fn draw_status_bar(&mut self, ctx: &egui::Context) {
+        let p = self.palette;
         egui::TopBottomPanel::bottom("statusbar")
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(232, 237, 250))
-                    .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+                    .fill(p.surface)
+                    .inner_margin(egui::Margin::symmetric(20.0, 8.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    // Apps dirs (read-only label showing all scanned dirs)
-                    let dirs_str = self.apps_dirs.iter()
-                        .filter(|d| d.exists())
-                        .map(|d| d.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    ui.label(
-                        RichText::new(format!("Apps: {}", dirs_str))
-                            .size(10.0)
-                            .color(Color32::from_rgb(90, 100, 140)),
-                    );
-                    ui.separator();
-
-                    // Icons dir -editable text field + browse button
-                    ui.label(
-                        RichText::new("Icons dir:")
-                            .size(10.0)
-                            .color(Color32::from_rgb(90, 100, 140)),
-                    );
+                    ui.label(bold_text("Icon folder", 12.0, p.text_muted));
 
                     let input_resp = ui.add(
                         egui::TextEdit::singleline(&mut self.icons_dir_input)
-                            .desired_width(300.0)
-                            .font(egui::FontId::monospace(11.0))
+                            .desired_width(320.0)
+                            .font(FontId::monospace(12.0))
+                            .margin(egui::vec2(8.0, 4.0))
                             .hint_text("/absolute/path/to/icons"),
                     );
 
                     // Commit on Enter or focus-loss
-                    if input_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if input_resp.lost_focus() {
                         let new_path = PathBuf::from(self.icons_dir_input.trim());
                         if new_path.is_absolute() {
                             if !new_path.exists() {
@@ -652,22 +971,20 @@ impl eframe::App for IconManagerApp {
                             }
                             self.icons_dir = new_path;
                             self.icons_dir_input = self.icons_dir.display().to_string();
-                            self.global_status = format!(
-                                "Icons dir set to {}",
-                                self.icons_dir.display()
-                            );
+                            self.global_status =
+                                format!("Icon folder set to {}", self.icons_dir.display());
                         } else {
                             // Reset the text field to current valid value
                             self.icons_dir_input = self.icons_dir.display().to_string();
                             self.global_status =
-                                "Icons dir must be an absolute path (starting with /)".to_string();
+                                "Icon folder must be an absolute path (starting with /)".to_string();
                         }
                     }
 
-                    // Browse button -native folder picker
+                    // Browse button: native folder picker
                     if ui
-                        .button(RichText::new("📂").size(13.0))
-                        .on_hover_text("Browse for icons folder")
+                        .add(secondary_button(&p, "Browse…").min_size(Vec2::new(0.0, 28.0)))
+                        .on_hover_text("Browse for icon folder")
                         .clicked()
                     {
                         if let Some(picked) = rfd::FileDialog::new()
@@ -680,317 +997,430 @@ impl eframe::App for IconManagerApp {
                             }
                             self.icons_dir = picked;
                             self.icons_dir_input = self.icons_dir.display().to_string();
-                            self.global_status = format!(
-                                "Icons dir set to {}",
-                                self.icons_dir.display()
-                            );
+                            self.global_status =
+                                format!("Icon folder set to {}", self.icons_dir.display());
                         }
                     }
+
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let dirs_str = self
+                            .apps_dirs
+                            .iter()
+                            .filter(|d| d.exists())
+                            .map(|d| d.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("  ·  ");
+                        ui.add(
+                            egui::Label::new(text(format!("Scanning  {dirs_str}"), 11.0, p.text_faint))
+                                .truncate(true),
+                        );
+                    });
                 });
             });
-
-        // ── Right detail panel ───────────────────────────────────────────────
-        if let Some(sel) = self.selected {
-            if sel < self.entries.len() {
-                egui::SidePanel::right("detail_panel")
-                    .default_width(360.0)
-                    .min_width(300.0)
-                    .frame(
-                        egui::Frame::none()
-                            .fill(Color32::from_rgb(255, 255, 255))
-                            .inner_margin(egui::Margin::same(16.0)),
-                    )
-                    .show(ctx, |ui| {
-                        self.draw_detail_panel(ui, ctx, sel);
-                    });
-            }
-        }
-
-        // ── Central panel: app list ──────────────────────────────────────────
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(245, 247, 252))
-                    .inner_margin(egui::Margin::same(8.0)),
-            )
-            .show(ctx, |ui| {
-                self.draw_entry_list(ui, ctx);
-            });
     }
-}
 
-impl IconManagerApp {
-    // ── Entry list ───────────────────────────────────────────────────────────
+    // ── Entry grid / list ────────────────────────────────────────────────────
 
-    fn draw_entry_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let filter = self.filter.to_lowercase();
-
-        // Build filtered index list first (to avoid borrow issues)
+    fn draw_entries(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let p = self.palette;
+        let needle = self.filter.to_lowercase();
         let filtered: Vec<usize> = (0..self.entries.len())
-            .filter(|&i| {
-                let e = &self.entries[i];
-                if self.show_only_pwa && !e.is_chrome_pwa {
-                    return false;
-                }
-                if !filter.is_empty() {
-                    let name_lower = e.name.to_lowercase();
-                    let icon_lower = e.icon_value.to_lowercase();
-                    if !name_lower.contains(&filter) && !icon_lower.contains(&filter) {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|&i| self.matches(&self.entries[i], &needle))
             .collect();
 
-        ui.label(
-            RichText::new(format!("Showing {} of {} entries", filtered.len(), self.entries.len()))
-                .size(11.0)
-                .color(Color32::from_rgb(140, 155, 185)),
-        );
-        ui.add_space(4.0);
-
-        // Column headers -laid out with the same widths and spacing as the
-        // rows below (6px row margin, 32px icon, 6px gap, two 180px columns)
-        // so each heading sits over its column.
-        let header = |text: &str| {
-            RichText::new(text).size(11.0).color(Color32::from_rgb(80, 90, 140))
-        };
         ui.horizontal(|ui| {
-            ui.add_space(6.0);
-            ui.add_sized(Vec2::new(32.0, 14.0), egui::Label::new(header("Icon")));
-            ui.add_space(6.0);
-            ui.add_sized(Vec2::new(180.0, 14.0), egui::Label::new(header("Application")));
-            ui.add_sized(Vec2::new(180.0, 14.0), egui::Label::new(header("Icon Value")));
-            ui.label(header("Flags"));
+            let title = match self.filter_mode {
+                Filter::All => "All applications",
+                Filter::Pwa => "Chrome web apps",
+                Filter::Unsaved => "Unsaved changes",
+            };
+            ui.label(bold_text(title, 15.0, p.text));
+            ui.label(text(
+                if filtered.len() == self.entries.len() {
+                    format!("{}", filtered.len())
+                } else {
+                    format!("{} of {}", filtered.len(), self.entries.len())
+                },
+                13.0,
+                p.text_faint,
+            ));
         });
+        ui.add_space(10.0);
 
-        ui.separator();
+        if filtered.is_empty() {
+            ui.add_space(60.0);
+            ui.vertical_centered(|ui| {
+                ui.label(text("🔍", 32.0, p.text_faint));
+                ui.add_space(6.0);
+                ui.label(bold_text("Nothing here", 15.0, p.text));
+                ui.label(text(
+                    match (self.filter_mode, needle.is_empty()) {
+                        (Filter::Unsaved, true) => "Every change has been saved.",
+                        (Filter::Pwa, true) => "No Chrome web apps were found.",
+                        _ => "No applications match your search.",
+                    },
+                    13.0,
+                    p.text_muted,
+                ));
+            });
+            return;
+        }
 
         ScrollArea::vertical()
             .id_source("entry_list")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                for &idx in &filtered {
-                    let is_selected = self.selected == Some(idx);
+                ui.add_space(2.0);
+                match self.view {
+                    ViewMode::Grid => self.draw_grid(ui, ctx, &filtered),
+                    ViewMode::List => self.draw_list(ui, ctx, &filtered),
+                }
+                ui.add_space(16.0);
+            });
+    }
 
-                    // Clone what we need for display
-                    let entry_name = self.entries[idx].name.clone();
-                    let entry_icon = self.entries[idx].icon_value.clone();
-                    let is_pwa = self.entries[idx].is_chrome_pwa;
-                    let is_modified = self.entries[idx].modified;
-                    let entry_status = self.entries[idx].status.clone();
+    fn draw_grid(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, filtered: &[usize]) {
+        const GAP: f32 = 12.0;
+        const MIN_W: f32 = 136.0;
+        const CARD_H: f32 = 150.0;
 
-                    // Try to load texture
-                    let tex = self.load_icon_texture(ctx, &entry_icon);
+        // Leave room for the floating scroll bar on the right.
+        let avail = ui.available_width() - 8.0;
+        let cols = (((avail + GAP) / (MIN_W + GAP)).floor() as usize).max(1);
+        let card_w = ((avail - GAP * (cols - 1) as f32) / cols as f32).min(200.0);
+        let size = Vec2::new(card_w, CARD_H);
 
-                    let bg_color = if is_selected {
-                        Color32::from_rgb(210, 225, 252)
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-
-                    let row_frame = egui::Frame::none()
-                        .fill(bg_color)
-                        .rounding(egui::Rounding::same(6.0))
-                        .inner_margin(egui::Margin::symmetric(6.0, 4.0));
-
-                    let response = row_frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Icon thumbnail
-                            if let Some(ref tex) = tex {
-                                ui.image(egui::load::SizedTexture::new(
-                                    tex.id(),
-                                    Vec2::new(32.0, 32.0),
-                                ));
-                            } else {
-                                // Placeholder
-                                let (rect, _) = ui.allocate_exact_size(
-                                    Vec2::new(32.0, 32.0),
-                                    Sense::hover(),
-                                );
-                                ui.painter().rect_filled(
-                                    rect,
-                                    egui::Rounding::same(4.0),
-                                    Color32::from_rgb(210, 220, 240),
-                                );
-                                ui.painter().text(
-                                    rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "?",
-                                    egui::FontId::proportional(16.0),
-                                    Color32::from_rgb(140, 155, 185),
-                                );
-                            }
-
-                            ui.add_space(6.0);
-
-                            // Name
-                            let name_label = if is_modified {
-                                RichText::new(format!("• {entry_name}"))
-                                    .color(Color32::from_rgb(180, 100, 20))
-                                    .size(13.0)
-                            } else {
-                                RichText::new(&entry_name).size(13.0)
-                            };
-                            ui.add_sized(
-                                Vec2::new(180.0, 32.0),
-                                egui::Label::new(name_label).truncate(true),
-                            );
-
-                            // Icon path (truncated)
-                            ui.add_sized(
-                                Vec2::new(180.0, 32.0),
-                                egui::Label::new(
-                                    RichText::new(&entry_icon)
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(30, 120, 70)),
-                                )
-                                .truncate(true),
-                            );
-
-                            // Badges
-                            if is_pwa {
-                                let badge_frame = egui::Frame::none()
-                                    .fill(Color32::from_rgb(210, 225, 252))
-                                    .rounding(egui::Rounding::same(4.0))
-                                    .inner_margin(egui::Margin::symmetric(4.0, 2.0));
-                                badge_frame.show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new("PWA")
-                                            .size(10.0)
-                                            .color(Color32::from_rgb(50, 90, 200)),
-                                    );
-                                });
-                            }
-
-                            // Status
-                            if let Some(ref s) = entry_status {
-                                ui.label(
-                                    RichText::new(s)
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(20, 140, 70)),
-                                );
-                            }
-                        });
-                    });
-
-                    // Make the whole row clickable
-                    let row_resp = ui.interact(
-                        response.response.rect,
-                        ui.id().with(("row", idx)),
-                        Sense::click(),
-                    );
-                    if row_resp.clicked() {
-                        self.selected = Some(idx);
-                    }
-                    if row_resp.hovered() && !is_selected {
-                        ui.painter().rect_stroke(
-                            response.response.rect,
-                            egui::Rounding::same(6.0),
-                            Stroke::new(1.0, Color32::from_rgb(100, 149, 237)),
-                        );
-                    }
-
-                    ui.add_space(2.0);
+        for row in filtered.chunks(cols) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                for &idx in row {
+                    self.grid_card(ui, ctx, idx, size);
                 }
             });
+            ui.add_space(GAP - ui.spacing().item_spacing.y);
+        }
+    }
+
+    fn grid_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, idx: usize, size: Vec2) {
+        let p = self.palette;
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        if resp.clicked() {
+            self.selected = Some(idx);
+        }
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let icon_value = self.entries[idx].icon_value.clone();
+        let tex = self.load_icon_texture(ctx, &icon_value);
+        let e = &self.entries[idx];
+        let selected = self.selected == Some(idx);
+        let hovered = resp.hovered();
+        if hovered {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+
+        let (fill, stroke) = if selected {
+            (p.accent_soft, Stroke::new(1.5_f32, p.accent))
+        } else if hovered {
+            (p.surface, Stroke::new(1.0_f32, p.border_strong))
+        } else {
+            (p.surface, Stroke::new(1.0_f32, p.border))
+        };
+        paint_shadow(ui, &p, rect, 12.0, if hovered || selected { 4.0 } else { 1.5 });
+        ui.painter().rect(rect, Rounding::same(12.0), fill, stroke);
+
+        let icon_rect = Rect::from_center_size(
+            Pos2::new(rect.center().x, rect.top() + 22.0 + 30.0),
+            Vec2::splat(60.0),
+        );
+        paint_icon(ui, &p, icon_rect, tex.as_ref(), &e.name);
+
+        let galley = layout_text(
+            ui,
+            &e.name,
+            FontId::proportional(13.0),
+            p.text,
+            rect.width() - 20.0,
+            2,
+            Align::Center,
+        );
+        ui.painter()
+            .galley(Pos2::new(rect.center().x, icon_rect.bottom() + 12.0), galley, p.text);
+
+        if e.is_chrome_pwa {
+            let bg = if selected { p.surface } else { p.accent_soft };
+            paint_pill(ui, rect.left_top() + egui::vec2(8.0, 8.0), "PWA", p.accent, bg);
+        }
+        if e.modified {
+            ui.painter()
+                .circle_filled(rect.right_top() + egui::vec2(-13.0, 13.0), 4.5, p.warning);
+        } else if e.status.as_deref().is_some_and(|s| s.starts_with('✔')) {
+            ui.painter().text(
+                rect.right_top() + egui::vec2(-13.0, 13.0),
+                Align2::CENTER_CENTER,
+                "✔",
+                FontId::proportional(12.0),
+                p.success,
+            );
+        }
+
+        resp.on_hover_text(&e.name);
+    }
+
+    fn draw_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, filtered: &[usize]) {
+        const ROW_H: f32 = 56.0;
+        let width = ui.available_width() - 8.0;
+        let p = self.palette;
+
+        // One card holding all rows, separated by hairlines.
+        let total = Rect::from_min_size(
+            ui.cursor().min,
+            Vec2::new(width, ROW_H * filtered.len() as f32),
+        );
+        paint_shadow(ui, &p, total, 12.0, 1.5);
+        ui.painter()
+            .rect(total, Rounding::same(12.0), p.surface, Stroke::new(1.0_f32, p.border));
+
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (n, &idx) in filtered.iter().enumerate() {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, ROW_H), Sense::click());
+            if resp.clicked() {
+                self.selected = Some(idx);
+            }
+            if !ui.is_rect_visible(rect) {
+                continue;
+            }
+            let icon_value = self.entries[idx].icon_value.clone();
+            let tex = self.load_icon_texture(ctx, &icon_value);
+            let e = &self.entries[idx];
+            let selected = self.selected == Some(idx);
+            let hovered = resp.hovered();
+            if hovered {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+
+            // Round only the outer corners of the first and last rows.
+            let r = 12.0;
+            let rounding = Rounding {
+                nw: if n == 0 { r } else { 0.0 },
+                ne: if n == 0 { r } else { 0.0 },
+                sw: if n + 1 == filtered.len() { r } else { 0.0 },
+                se: if n + 1 == filtered.len() { r } else { 0.0 },
+            };
+            let inner = rect.shrink(1.0);
+            if selected {
+                ui.painter().rect_filled(inner, rounding, p.accent_soft);
+                ui.painter().rect_filled(
+                    Rect::from_min_size(inner.min, Vec2::new(3.0, inner.height())),
+                    Rounding { nw: rounding.nw, sw: rounding.sw, ..Default::default() },
+                    p.accent,
+                );
+            } else if hovered {
+                ui.painter().rect_filled(inner, rounding, p.surface_alt);
+            }
+            if n > 0 {
+                ui.painter().hline(
+                    rect.x_range().shrink(16.0),
+                    rect.top(),
+                    Stroke::new(1.0_f32, p.border),
+                );
+            }
+
+            let icon_rect = Rect::from_min_size(
+                Pos2::new(rect.left() + 16.0, rect.center().y - 18.0),
+                Vec2::splat(36.0),
+            );
+            paint_icon(ui, &p, icon_rect, tex.as_ref(), &e.name);
+
+            // Badges, right-aligned
+            let mut badges: Vec<(&str, Color32, Color32)> = Vec::new();
+            if e.is_chrome_pwa {
+                badges.push(("PWA", p.accent, if selected { p.surface } else { p.accent_soft }));
+            }
+            if e.modified {
+                badges.push(("Unsaved", p.warning, p.warning_soft));
+            } else if e.status.as_deref().is_some_and(|s| s.starts_with('✔')) {
+                badges.push(("Saved", p.success, p.success_soft));
+            }
+            let mut x = rect.right() - 16.0;
+            for (label, fg, bg) in badges.iter().rev() {
+                x -= pill_width(ui, label);
+                let pill = paint_pill(ui, Pos2::new(x, rect.center().y - 9.0), label, *fg, *bg);
+                x = pill.left() - 6.0;
+            }
+
+            let text_left = icon_rect.right() + 14.0;
+            let text_w = (x - text_left - 12.0).max(40.0);
+            let name = layout_text(
+                ui,
+                &e.name,
+                FontId::new(14.0, theme::bold()),
+                p.text,
+                text_w,
+                1,
+                Align::LEFT,
+            );
+            let value = if e.icon_value.is_empty() { "(no icon set)" } else { &e.icon_value };
+            let sub = layout_text(
+                ui,
+                value,
+                FontId::monospace(11.5),
+                p.text_muted,
+                text_w,
+                1,
+                Align::LEFT,
+            );
+            let block_h = name.size().y + 2.0 + sub.size().y;
+            let top = rect.center().y - block_h / 2.0;
+            let name_h = name.size().y;
+            ui.painter().galley(Pos2::new(text_left, top), name, p.text);
+            ui.painter()
+                .galley(Pos2::new(text_left, top + name_h + 2.0), sub, p.text_muted);
+        }
     }
 
     // ── Detail / edit panel ──────────────────────────────────────────────────
 
     fn draw_detail_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, sel: usize) {
-        let entry = &self.entries[sel];
-        let entry_name = entry.name.clone();
-        let entry_path = entry.path.display().to_string();
-        let is_pwa = entry.is_chrome_pwa;
+        let p = self.palette;
 
-        ui.label(
-            RichText::new("Edit Entry")
-                .size(15.0)
-                .color(Color32::from_rgb(50, 90, 200))
-                .strong(),
-        );
-        ui.add_space(4.0);
-        ui.separator();
+        // Sticky footer with the status message and Save / Discard.
+        egui::TopBottomPanel::bottom("detail_footer")
+            .frame(
+                egui::Frame::none()
+                    .fill(p.surface)
+                    .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
+            )
+            .show_inside(ui, |ui| {
+                if let Some(s) = self.entries[sel].status.clone() {
+                    let (fg, bg) = if s.starts_with('✔') {
+                        (p.success, p.success_soft)
+                    } else if s.starts_with('✖') {
+                        (p.danger, p.danger_soft)
+                    } else {
+                        (p.warning, p.warning_soft)
+                    };
+                    egui::Frame::none()
+                        .fill(bg)
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(text(s, 12.5, fg));
+                        });
+                    ui.add_space(10.0);
+                }
+
+                let modified = self.entries[sel].modified;
+                ui.horizontal(|ui| {
+                    let w = (ui.available_width() - 8.0) / 2.0;
+                    let size = Vec2::new(w, 36.0);
+                    if ui
+                        .add_enabled(modified, secondary_button(&p, "Discard").min_size(size))
+                        .on_hover_text("Reload this entry from disk")
+                        .clicked()
+                    {
+                        self.discard_entry(sel);
+                    }
+                    if ui
+                        .add_enabled(modified, primary_button(&p, "Save changes").min_size(size))
+                        .on_hover_text("Write changes to the .desktop file  (Ctrl+S)")
+                        .clicked()
+                    {
+                        self.save_entry(sel);
+                    }
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(p.surface)
+                    .inner_margin(egui::Margin { left: 20.0, right: 20.0, top: 16.0, bottom: 8.0 }),
+            )
+            .show_inside(ui, |ui| {
+                ScrollArea::vertical()
+                    .id_source("detail_scroll")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        self.draw_detail_body(ui, ctx, sel);
+                    });
+            });
+    }
+
+    fn draw_detail_body(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, sel: usize) {
+        let p = self.palette;
+
+        ui.horizontal(|ui| {
+            section_label(ui, &p, "Edit entry");
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                let close = egui::Button::new(text("✖", 12.0, p.text_muted))
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::NONE)
+                    .min_size(Vec2::splat(26.0));
+                if ui.add(close).on_hover_text("Close  (Esc)").clicked() {
+                    self.selected = None;
+                }
+            });
+        });
         ui.add_space(8.0);
 
-        // App name
-        ui.label(RichText::new("Application").size(11.0).color(Color32::from_rgb(80, 95, 140)));
-        // Explicit colour: .strong() alone uses the theme's strong-text colour,
-        // which is the active-widget foreground (white), so the name was
-        // invisible on the white panel.
-        ui.label(
-            RichText::new(&entry_name)
-                .size(14.0)
-                .strong()
-                .color(Color32::from_rgb(30, 35, 55)),
-        );
-        ui.add_space(4.0);
+        // ── Hero: big icon, name, file name ─────────────────────────────────
+        let icon_value = self.entries[sel].icon_value.clone();
+        let tex = self.load_icon_texture(ctx, &icon_value);
+        let e = &self.entries[sel];
+        let name = e.name.clone();
+        let file_name = e
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let is_pwa = e.is_chrome_pwa;
+        let is_user = e.path.starts_with(dirs_next());
 
-        // File path
-        ui.label(RichText::new("File").size(11.0).color(Color32::from_rgb(80, 95, 140)));
-        ui.add(
-            egui::Label::new(
-                RichText::new(&entry_path)
-                    .size(10.0)
-                    .color(Color32::from_rgb(100, 115, 155)),
-            )
-            .truncate(true),
-        );
-        ui.add_space(10.0);
-
-        // ── Icon preview ─────────────────────────────────────────────────────
-        {
-            let icon_value = self.entries[sel].icon_value.clone();
-            let tex = self.load_icon_texture(ctx, &icon_value);
-            ui.label(RichText::new("Current Icon").size(11.0).color(Color32::from_rgb(80, 95, 140)));
-            ui.add_space(4.0);
-
-            egui::Frame::none()
-                .fill(Color32::from_rgb(235, 240, 252))
-                .rounding(egui::Rounding::same(8.0))
-                .inner_margin(egui::Margin::same(12.0))
-                .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        if let Some(ref t) = tex {
-                            ui.image(egui::load::SizedTexture::new(
-                                t.id(),
-                                Vec2::new(80.0, 80.0),
-                            ));
-                        } else {
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::new(80.0, 80.0), Sense::hover());
-                            ui.painter().rect_filled(
-                                rect,
-                                egui::Rounding::same(8.0),
-                                Color32::from_rgb(210, 220, 240),
-                            );
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "No Preview",
-                                egui::FontId::proportional(11.0),
-                                Color32::from_rgb(130, 130, 160),
-                            );
-                        }
-                    });
+        egui::Frame::none()
+            .fill(p.surface_alt)
+            .rounding(Rounding::same(14.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 20.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.vertical_centered(|ui| {
+                    let (well, _) = ui.allocate_exact_size(Vec2::splat(112.0), Sense::hover());
+                    ui.painter().rect(
+                        well,
+                        Rounding::same(24.0),
+                        p.surface,
+                        Stroke::new(1.0_f32, p.border),
+                    );
+                    paint_icon(ui, &p, well.shrink(16.0), tex.as_ref(), &name);
+                    ui.add_space(10.0);
+                    ui.add(egui::Label::new(bold_text(&name, 18.0, p.text)).wrap(true));
+                    ui.add(egui::Label::new(text(&file_name, 11.5, p.text_muted)).truncate(true));
+                    ui.add_space(4.0);
+                    let tags = format!(
+                        "{}{}",
+                        if is_user { "User entry" } else { "System entry" },
+                        if is_pwa { "  ·  Chrome web app" } else { "" }
+                    );
+                    ui.label(text(tags, 11.5, p.text_faint));
                 });
-        }
+            });
 
-        ui.add_space(10.0);
+        ui.add_space(18.0);
 
-        // ── Icon= field editor ───────────────────────────────────────────────
-        ui.label(RichText::new("Icon= value").size(11.0).color(Color32::from_rgb(80, 95, 140)));
+        // ── Icon ────────────────────────────────────────────────────────────
+        section_label(ui, &p, "Icon");
         ui.add_space(2.0);
-
         let icon_changed = {
             let entry = &mut self.entries[sel];
             let before = entry.icon_value.clone();
             ui.add(
                 egui::TextEdit::singleline(&mut entry.icon_value)
                     .desired_width(f32::INFINITY)
-                    .font(egui::FontId::monospace(12.0)),
+                    .font(FontId::monospace(13.0))
+                    .margin(egui::vec2(10.0, 8.0))
+                    .hint_text("Theme name (e.g. firefox) or absolute path"),
             );
             entry.icon_value != before
         };
@@ -999,98 +1429,66 @@ impl IconManagerApp {
             self.entries[sel].status = None;
         }
 
-        ui.add_space(8.0);
-
-        // ── Upload icon button ────────────────────────────────────────────────
-        ui.horizontal(|ui| {
-            let upload_btn = ui
-                .button(RichText::new("📁  Upload Icon…").size(13.0))
-                .on_hover_text(format!(
-                    "Select an image file -it will be copied to {}",
+        ui.add_space(6.0);
+        let choose = ui
+            .add(
+                secondary_button(&p, "Choose image…")
+                    .min_size(Vec2::new(ui.available_width(), 34.0)),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        ui.add_space(2.0);
+        ui.add(
+            egui::Label::new(text(
+                format!(
+                    "Copied to {} and installed into your icon theme at every size, so docks and launchers pick it up.",
                     self.icons_dir.display()
-                ));
+                ),
+                11.5,
+                p.text_faint,
+            ))
+            .wrap(true),
+        );
 
-            if upload_btn.clicked() {
-                // rfd file dialog (native)
-                let picked = rfd::FileDialog::new()
-                    .add_filter("Images", &["png", "jpg", "jpeg", "svg", "ico", "bmp", "webp"])
-                    .set_title("Select Icon Image")
-                    .pick_file();
+        if choose.clicked() {
+            self.choose_image(sel);
+        }
 
-                if let Some(src_path) = picked {
-                    match self.import_icon(&src_path) {
-                        Ok(theme_name) => {
-                            // Invalidate texture cache so the preview refreshes
-                            let old_key = self.entries[sel].icon_value.clone();
-                            self.icon_textures.remove(&old_key);
-                            self.icon_textures.remove(&theme_name);
-
-                            self.entries[sel].icon_value = theme_name.clone();
-                            self.entries[sel].modified = true;
-                            self.entries[sel].status = Some(
-                                format!("✔ Icon set to \"{theme_name}\" -save to apply")
-                            );
-                            self.global_status = format!(
-                                "Installed icon as theme name \"{}\" -dock & launcher will update on save",
-                                theme_name
-                            );
-                        }
-                        Err(e) => {
-                            self.entries[sel].status = Some(format!("✖ {e}"));
-                        }
-                    }
-                }
-            }
-        });
-
-        // ── Chrome PWA section ────────────────────────────────────────────────
+        // ── Chrome PWA ──────────────────────────────────────────────────────
         if is_pwa {
-            ui.add_space(14.0);
+            ui.add_space(18.0);
+            section_label(ui, &p, "Chrome web app");
+            ui.add_space(2.0);
             egui::Frame::none()
-                .fill(Color32::from_rgb(235, 242, 255))
-                .rounding(egui::Rounding::same(8.0))
-                .inner_margin(egui::Margin::same(10.0))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(160, 190, 240)))
+                .fill(p.surface_alt)
+                .stroke(Stroke::new(1.0_f32, p.border))
+                .rounding(Rounding::same(10.0))
+                .inner_margin(egui::Margin::same(14.0))
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("🌐  Chrome PWA Configuration")
-                            .size(13.0)
-                            .color(Color32::from_rgb(50, 90, 200))
-                            .strong(),
-                    );
-                    ui.add_space(6.0);
-
-                    // Detected app id
+                    ui.set_width(ui.available_width());
+                    ui.label(text("App ID", 11.5, p.text_muted));
                     let chrome_id = self.entries[sel]
                         .chrome_app_id
                         .clone()
                         .unwrap_or_else(|| "(not detected)".to_string());
-                    ui.label(
-                        RichText::new(format!("App ID slug: {chrome_id}"))
-                            .size(11.0)
-                            .color(Color32::from_rgb(20, 120, 60)),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(chrome_id).monospace().size(12.0).color(p.text),
+                        )
+                        .wrap(true),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
 
-                    // StartupWMClass editor
-                    ui.label(
-                        RichText::new("StartupWMClass=")
-                            .size(11.0)
-                            .color(Color32::from_rgb(160, 160, 190)),
-                    );
-
+                    ui.label(text("StartupWMClass", 11.5, p.text_muted));
                     let wm_changed = {
                         let entry = &mut self.entries[sel];
-                        let mut wm_val = entry
-                            .startup_wm_class
-                            .clone()
-                            .unwrap_or_default();
+                        let mut wm_val = entry.startup_wm_class.clone().unwrap_or_default();
                         let before = wm_val.clone();
                         ui.add(
                             egui::TextEdit::singleline(&mut wm_val)
                                 .desired_width(f32::INFINITY)
-                                .font(egui::FontId::monospace(12.0))
-                                .hint_text("e.g. chrome-<appid>-Default"),
+                                .font(FontId::monospace(12.5))
+                                .margin(egui::vec2(10.0, 7.0))
+                                .hint_text("chrome-<appid>-Default"),
                         );
                         let changed = wm_val != before;
                         entry.startup_wm_class = Some(wm_val);
@@ -1101,14 +1499,12 @@ impl IconManagerApp {
                     }
 
                     ui.add_space(6.0);
-
-                    // Auto-fill StartupWMClass from original Icon value
                     if ui
-                        .button(RichText::new("⚡ Auto-fill from Icon value").size(12.0))
+                        .add(secondary_button(&p, "⚡  Fill from app ID"))
                         .on_hover_text(
-                            "Sets StartupWMClass to the original icon name\n\
-                             (e.g. chrome-<appid>-Default), which fixes\n\
-                             window matching for Chrome PWAs.",
+                            "Sets StartupWMClass to the app's original icon name\n\
+                             (chrome-<appid>-Default), so the dock groups its\n\
+                             windows under your custom icon.",
                         )
                         .clicked()
                     {
@@ -1118,76 +1514,88 @@ impl IconManagerApp {
                             .unwrap_or_else(|| self.entries[sel].icon_value.clone());
                         self.entries[sel].startup_wm_class = Some(slug);
                         self.entries[sel].modified = true;
-                        self.entries[sel].status = Some("WMClass set -save to apply".into());
+                        self.entries[sel].status = Some("WMClass set, save to apply".into());
                     }
+                    ui.add_space(2.0);
+                    ui.add(
+                        egui::Label::new(text(
+                            "Without it, the dock may show Chrome's icon for this app's windows.",
+                            11.5,
+                            p.text_faint,
+                        ))
+                        .wrap(true),
+                    );
                 });
         }
 
-        // ── Status message ────────────────────────────────────────────────────
-        if let Some(ref s) = self.entries[sel].status.clone() {
-            ui.add_space(8.0);
-            let color = if s.starts_with('✔') {
-                Color32::from_rgb(20, 140, 70)
-            } else if s.starts_with('✖') {
-                Color32::from_rgb(190, 40, 40)
-            } else {
-                Color32::from_rgb(150, 110, 20)
-            };
-            ui.label(RichText::new(s).size(12.0).color(color));
-        }
-
-        ui.add_space(12.0);
-        ui.separator();
+        // ── File ────────────────────────────────────────────────────────────
+        ui.add_space(18.0);
+        section_label(ui, &p, "File");
+        ui.add_space(2.0);
+        let path = self.entries[sel].path.display().to_string();
+        ui.add(
+            egui::Label::new(RichText::new(path).monospace().size(11.5).color(p.text_muted))
+                .wrap(true),
+        );
         ui.add_space(8.0);
+    }
 
-        // ── Save / Discard buttons ─────────────────────────────────────────────
-        ui.horizontal(|ui| {
-            let modified = self.entries[sel].modified;
+    /// Pick an image, install it into the icon theme and point Icon= at it.
+    fn choose_image(&mut self, sel: usize) {
+        let picked = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "svg", "ico", "bmp", "webp"])
+            .set_title("Select Icon Image")
+            .pick_file();
+        let Some(src_path) = picked else { return };
 
-            let save_btn = ui.add_enabled(
-                modified,
-                egui::Button::new(RichText::new("💾  Save").size(13.0)).min_size(Vec2::new(100.0, 30.0)),
-            )
-            .on_hover_text("Write changes back to the .desktop file");
+        match self.import_icon(&src_path) {
+            Ok(theme_name) => {
+                // Invalidate texture cache so the preview refreshes
+                let old_key = self.entries[sel].icon_value.clone();
+                self.icon_textures.remove(&old_key);
+                self.icon_textures.remove(&theme_name);
 
-            if save_btn.clicked() {
-                match self.entries[sel].save() {
-                    Ok(()) => {
-                        self.global_status = format!("Saved: {}", self.entries[sel].name);
-                    }
-                    Err(e) => {
-                        self.entries[sel].status = Some(format!("✖ {e}"));
-                    }
-                }
+                self.entries[sel].icon_value = theme_name.clone();
+                self.entries[sel].modified = true;
+                self.entries[sel].status =
+                    Some(format!("✔ Icon set to \"{theme_name}\", save to apply"));
+                self.global_status = format!(
+                    "Installed icon \"{theme_name}\"; the dock and launcher update on save"
+                );
             }
-
-            ui.add_space(8.0);
-
-            let discard_btn = ui
-                .add_enabled(
-                    modified,
-                    egui::Button::new(RichText::new("↩  Discard").size(13.0)).min_size(Vec2::new(100.0, 30.0)),
-                )
-                .on_hover_text("Reload this entry from disk");
-
-            if discard_btn.clicked() {
-                let path = self.entries[sel].path.clone();
-                if let Some(fresh) = DesktopEntry::load(path) {
-                    self.entries[sel] = fresh;
-                }
+            Err(e) => {
+                self.entries[sel].status = Some(format!("✖ {e}"));
             }
-        });
-
-        ui.add_space(8.0);
-
-        // Close detail panel
-        if ui
-            .button(RichText::new("✖  Close").size(12.0).color(Color32::from_rgb(160, 60, 60)))
-            .clicked()
-        {
-            self.selected = None;
         }
     }
+}
+
+/// A row of mutually exclusive pill buttons inside a rounded track.
+fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, p: &Palette, value: &mut T, options: &[(T, &str)]) {
+    egui::Frame::none()
+        .fill(p.surface_alt)
+        .rounding(Rounding::same(9.0))
+        .inner_margin(egui::Margin::same(3.0))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                for (opt, label) in options {
+                    let on = *value == *opt;
+                    let btn = egui::Button::new(if on {
+                        bold_text(*label, 12.5, p.text)
+                    } else {
+                        text(*label, 12.5, p.text_muted)
+                    })
+                    .fill(if on { p.surface } else { Color32::TRANSPARENT })
+                    .stroke(if on { Stroke::new(1.0_f32, p.border) } else { Stroke::NONE })
+                    .rounding(Rounding::same(7.0))
+                    .min_size(Vec2::new(54.0, 26.0));
+                    if ui.add(btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        *value = *opt;
+                    }
+                }
+            });
+        });
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

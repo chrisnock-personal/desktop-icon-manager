@@ -21,7 +21,9 @@ immediate mode GUI, no GTK/Qt dependency at runtime).
 | **Search / filter** | Filter by app name or icon value; toggle "PWAs only" |
 | **Configurable icons dir** | Icons directory is editable in the status bar (defaults to `~/Pictures/Icons`) |
 | **Non-destructive** | Changes only written when you click **Save** |
-| **Light theme** | Clean light UI with blue accents |
+| **Light & dark themes** | Follows the desktop's colour scheme; toggle from the header |
+| **Grid & list views** | Card grid or compact list, with filter chips for All, Web apps and Unsaved |
+| **Keyboard shortcuts** | Ctrl+S saves the open entry, Esc closes it |
 | **Multi-distro build** | Build script detects and uses apt, dnf/yum, zypper, pacman, or xbps |
 
 ---
