@@ -235,6 +235,19 @@ fn key_value(line: &str) -> Option<(&str, &str)> {
     Some((k.trim(), v.trim_start()))
 }
 
+/// The theme name an `Icon=` value refers to: the value itself for a bare
+/// name (which may contain dots, like `org.gnome.Foo`), or the file stem for
+/// a path to a file.
+fn own_icon_name(icon_value: &str) -> Option<&str> {
+    if icon_value.is_empty() {
+        None
+    } else if icon_value.contains('/') {
+        Path::new(icon_value).file_stem().and_then(|s| s.to_str())
+    } else {
+        Some(icon_value)
+    }
+}
+
 /// The user-level launcher that shadows `path`, if `path` isn't already there.
 fn local_application_path(home: &Path, path: &Path) -> Option<PathBuf> {
     let dir = home.join(".local/share/applications");
@@ -496,17 +509,37 @@ impl IconManagerApp {
         );
     }
 
-    /// Install an image into the icon theme and return its theme name.
-    fn import_icon(&self, source: &Path) -> Result<String, String> {
+    /// Install an image as `entry`'s icon and return its theme name.
+    fn import_icon(&self, source: &Path, entry: &Path) -> Result<String, String> {
         let targets = install::Targets::for_user(&self.icons_dir);
-        let ours = [targets.hicolor.clone(), targets.pixmaps.clone()];
-        // A name that resolves to someone else's icon (a system theme's
-        // `firefox`) is taken: installing over it would change that app too.
-        let taken = |name: &str| {
-            icons::resolve_icon_path(name, &self.icon_index)
-                .is_some_and(|p| !ours.iter().any(|o| p.starts_with(o)))
+        let ours = |p: &Path| {
+            [&targets.hicolor, &targets.pixmaps, &targets.icons_dir]
+                .iter()
+                .any(|dir| p.starts_with(dir))
         };
-        install::install_icon(source, &targets, taken)
+        let current = self.entries.iter().find(|e| e.path == entry);
+        let current_is_ours = current
+            .and_then(|e| icons::resolve_icon_path(&e.icon_value, &self.icon_index))
+            .is_some_and(|p| ours(&p));
+        // Only the entry's own current icon name may be reused: any other
+        // name with files in the user's folders belongs to another app.
+        let own_name = current
+            .filter(|_| current_is_ours)
+            .and_then(|e| own_icon_name(&e.icon_value));
+
+        // Names are taken by icons in system themes *and* by icons another
+        // app put in the user's folders. Re-importing the entry's own current
+        // name is the one case where overwriting is safe.
+        let taken = |name: &str| {
+            if own_name == Some(name) {
+                return false;
+            }
+            let files = install::installed_files(&targets, name);
+            files.iter().any(|p| p.exists())
+                || icons::resolve_icon_path(name, &self.icon_index)
+                    .is_some_and(|p| !ours(&p))
+        };
+        install::install_icon(source, entry, &targets, taken)
     }
 
     fn load_icon_texture(
@@ -1562,7 +1595,7 @@ impl IconManagerApp {
             self.global_status = "The entry was reloaded while choosing; pick the image again".into();
             return;
         };
-        match self.import_icon(file) {
+        match self.import_icon(file, entry) {
             Ok(theme_name) => {
                 // The new icon is now in the theme: re-index and drop
                 // cached previews so it (and anything it replaced) reloads.
@@ -1652,6 +1685,15 @@ mod tests {
         let p = dir.join(name);
         fs::write(&p, content).unwrap();
         p
+    }
+
+    #[test]
+    fn only_the_entrys_own_icon_name_is_reusable() {
+        assert_eq!(own_icon_name("notes-custom"), Some("notes-custom"));
+        assert_eq!(own_icon_name("org.gnome.Notes"), Some("org.gnome.Notes"));
+        assert_eq!(own_icon_name("/home/u/Icons/notes-custom.png"), Some("notes-custom"));
+        assert_eq!(own_icon_name("~/Icons/music.svg"), Some("music"));
+        assert_eq!(own_icon_name(""), None);
     }
 
     const PWA: &str = "com.google.Chrome.flextop.chrome-abc-Default.desktop";

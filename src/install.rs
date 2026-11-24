@@ -34,10 +34,12 @@ impl Targets {
     }
 }
 
-/// A theme name derived from a file name: its stem, lower-cased, with
-/// anything but letters, digits, `-` and `_` replaced by `-`.
-pub fn theme_name_for(source: &Path) -> String {
-    let name: String = source
+/// A theme name derived from a `.desktop` entry's filename: its stem,
+/// lower-cased, with anything but letters, digits, `-` and `_` replaced by
+/// `-`. Naming the icon after the entry (not the image) means two entries
+/// picking images both called `icon.png` don't share a theme name.
+pub fn theme_name_for(entry: &Path) -> String {
+    let name: String = entry
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
@@ -45,25 +47,58 @@ pub fn theme_name_for(source: &Path) -> String {
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect::<String>()
         .to_lowercase();
-    if name.is_empty() { "icon".into() } else { name }
+    let name = name.trim_matches('-');
+    if name.is_empty() { "icon".into() } else { name.into() }
 }
 
-/// Install `source` as an icon and return its theme name.
+/// Every path an import of `name` writes, in the user's icon folders as well
+/// as the theme. Used both to clean up before reinstalling and to spot names
+/// that are already in use -including icons another app installed locally.
+pub fn installed_files(targets: &Targets, name: &str) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = SIZES
+        .iter()
+        .map(|s| targets.hicolor.join(format!("{s}x{s}/apps/{name}.png")))
+        .collect();
+    files.push(targets.hicolor.join(format!("scalable/apps/{name}.svg")));
+    files.push(targets.pixmaps.join(format!("{name}.png")));
+    files.push(targets.pixmaps.join(format!("{name}.svg")));
+    // The kept originals are named after the theme, never after the image,
+    // so they can't overwrite an unrelated file that happens to share the
+    // image's filename.
+    for ext in ["png", "jpg", "jpeg", "svg", "ico", "bmp", "webp"] {
+        files.push(targets.icons_dir.join(format!("{name}.{ext}")));
+    }
+    files
+}
+
+/// Pick the first free name, adding `-custom` (then `-custom-2`, …) when a
+/// name would collide with another app's icon.
+fn choose_theme_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut candidate = base.to_string();
+    let mut attempt = 0;
+    while taken(&candidate) {
+        attempt += 1;
+        candidate = if attempt == 1 {
+            format!("{base}-custom")
+        } else {
+            format!("{base}-custom-{attempt}")
+        };
+    }
+    candidate
+}
+
+/// Install `source` as the icon for `entry` and return its theme name.
 ///
-/// `taken(name)` says whether `name` already belongs to another icon (an
-/// app's own icon in a system theme). Installing over it would change that
-/// app's icon too, so a `-custom` suffix is added instead.
+/// `taken(name)` says whether `name` already belongs to another icon: a
+/// system theme's icon, or one in the user's own icon folders. Installing
+/// over it would change that app's icon too, so a free suffix is chosen.
 pub fn install_icon(
     source: &Path,
+    entry: &Path,
     targets: &Targets,
     taken: impl Fn(&str) -> bool,
 ) -> Result<String, String> {
-    let filename = source.file_name().ok_or("Invalid source filename")?;
-    let mut theme_name = theme_name_for(source);
-    if taken(&theme_name) {
-        theme_name.push_str("-custom");
-    }
-
+    let theme_name = choose_theme_name(&theme_name_for(entry), taken);
     let bytes = fs::read(source).map_err(|e| format!("Could not read {}: {e}", source.display()))?;
     let is_svg = looks_like_svg(&bytes);
     // Decode before touching anything, so a bad file leaves no half-install.
@@ -79,7 +114,12 @@ pub fn install_icon(
     // 1. Keep the original in the icons folder.
     fs::create_dir_all(&targets.icons_dir)
         .map_err(|e| format!("Could not create {}: {e}", targets.icons_dir.display()))?;
-    let dest = targets.icons_dir.join(filename);
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+        .unwrap_or("png");
+    let dest = targets.icons_dir.join(format!("{theme_name}.{ext}"));
     // fs::copy truncates the destination before reading the source, so
     // copying a file onto itself (re-picking an icon from icons_dir) would
     // empty it.
@@ -130,17 +170,13 @@ pub fn install_icon(
     Ok(theme_name)
 }
 
-/// Remove every file an import of `name` installs.
+/// Remove every theme/pixmap file an import of `name` installs. The kept
+/// original is deliberately left in the icons folder: it is the user's copy.
 fn remove_installed(targets: &Targets, name: &str) {
-    let mut stale: Vec<PathBuf> = SIZES
-        .iter()
-        .map(|s| targets.hicolor.join(format!("{s}x{s}/apps/{name}.png")))
-        .collect();
-    stale.push(targets.hicolor.join(format!("scalable/apps/{name}.svg")));
-    stale.push(targets.pixmaps.join(format!("{name}.png")));
-    stale.push(targets.pixmaps.join(format!("{name}.svg")));
-    for p in stale {
-        let _ = fs::remove_file(p);
+    for p in installed_files(targets, name) {
+        if !p.starts_with(&targets.icons_dir) {
+            let _ = fs::remove_file(p);
+        }
     }
 }
 
@@ -198,6 +234,11 @@ mod tests {
         img.save_with_format(path, format).unwrap();
     }
 
+    /// Names in use from the user's folders, as the app checks them.
+    fn local_taken(targets: &Targets) -> impl Fn(&str) -> bool + '_ {
+        |name| installed_files(targets, name).iter().any(|p| p.exists())
+    }
+
     const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
 
     #[test]
@@ -205,13 +246,13 @@ mod tests {
         let t = Tmp::new("raster");
         let src = t.0.join("My App.png");
         write_png(&src, 300, 100, ImageFormat::Png);
-        let name = install_icon(&src, &t.targets(), |_| false).unwrap();
+        let name = install_icon(&src, &t.0.join("My App.desktop"), &t.targets(), |_| false).unwrap();
         assert_eq!(name, "my-app");
         for s in SIZES {
             let p = t.0.join(format!("hicolor/{s}x{s}/apps/my-app.png"));
             assert_eq!(image::image_dimensions(&p).unwrap(), (s, s), "{}", p.display());
         }
-        assert!(t.0.join("Icons/My App.png").is_file());
+        assert!(t.0.join("Icons/my-app.png").is_file());
         // The pixmaps fallback is a real PNG, not a renamed copy.
         let pix = t.0.join("pixmaps/my-app.png");
         assert_eq!(image::ImageFormat::from_path(&pix).unwrap(), ImageFormat::Png);
@@ -223,7 +264,7 @@ mod tests {
         let t = Tmp::new("mislabelled");
         let src = t.0.join("photo.png");
         write_png(&src, 64, 64, ImageFormat::Jpeg);
-        install_icon(&src, &t.targets(), |_| false).unwrap();
+        install_icon(&src, &t.0.join("photo.desktop"), &t.targets(), |_| false).unwrap();
         assert!(t.0.join("hicolor/48x48/apps/photo.png").is_file());
     }
 
@@ -232,7 +273,7 @@ mod tests {
         let t = Tmp::new("broken");
         let src = t.0.join("broken.png");
         fs::write(&src, b"not an image").unwrap();
-        assert!(install_icon(&src, &t.targets(), |_| false).is_err());
+        assert!(install_icon(&src, &t.0.join("broken.desktop"), &t.targets(), |_| false).is_err());
         assert!(!t.0.join("hicolor").exists());
         assert!(!t.0.join("Icons/broken.png").exists());
     }
@@ -242,7 +283,7 @@ mod tests {
         let t = Tmp::new("svg");
         let src = t.0.join("logo.svg");
         fs::write(&src, SVG).unwrap();
-        install_icon(&src, &t.targets(), |_| false).unwrap();
+        install_icon(&src, &t.0.join("logo.desktop"), &t.targets(), |_| false).unwrap();
         assert!(t.0.join("hicolor/scalable/apps/logo.svg").is_file());
         assert!(t.0.join("pixmaps/logo.svg").is_file());
         assert!(!t.0.join("pixmaps/logo.png").exists());
@@ -253,10 +294,10 @@ mod tests {
         let t = Tmp::new("reimport");
         let svg = t.0.join("logo.svg");
         fs::write(&svg, SVG).unwrap();
-        install_icon(&svg, &t.targets(), |_| false).unwrap();
+        install_icon(&svg, &t.0.join("logo.desktop"), &t.targets(), |_| false).unwrap();
         let png = t.0.join("logo.png");
         write_png(&png, 32, 32, ImageFormat::Png);
-        install_icon(&png, &t.targets(), |_| false).unwrap();
+        install_icon(&png, &t.0.join("logo.desktop"), &t.targets(), |_| false).unwrap();
         assert!(!t.0.join("hicolor/scalable/apps/logo.svg").exists());
         assert!(!t.0.join("pixmaps/logo.svg").exists());
         assert!(t.0.join("hicolor/256x256/apps/logo.png").is_file());
@@ -267,8 +308,86 @@ mod tests {
         let t = Tmp::new("taken");
         let src = t.0.join("firefox.png");
         write_png(&src, 32, 32, ImageFormat::Png);
-        let name = install_icon(&src, &t.targets(), |n| n == "firefox").unwrap();
+        let name = install_icon(
+            &src,
+            &t.0.join("firefox.desktop"),
+            &t.targets(),
+            |n| n == "firefox",
+        )
+        .unwrap();
         assert_eq!(name, "firefox-custom");
+    }
+
+    #[test]
+    fn two_entries_with_the_same_image_name_get_different_theme_names() {
+        let t = Tmp::new("same-image");
+        let src = t.0.join("icon.png");
+        write_png(&src, 32, 32, ImageFormat::Png);
+        let targets = t.targets();
+        let music = install_icon(&src, &t.0.join("Music.desktop"), &targets, local_taken(&targets)).unwrap();
+        let mail = install_icon(&src, &t.0.join("Mail.desktop"), &targets, local_taken(&targets)).unwrap();
+        assert_eq!((music.as_str(), mail.as_str()), ("music", "mail"));
+        assert!(targets.icons_dir.join("music.png").is_file());
+        assert!(targets.icons_dir.join("mail.png").is_file());
+    }
+
+    #[test]
+    fn an_icon_in_the_users_theme_is_taken_and_left_alone() {
+        let t = Tmp::new("user-taken");
+        let targets = t.targets();
+        let other = targets.hicolor.join("48x48/apps/notes.png");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        write_png(&other, 48, 48, ImageFormat::Png);
+        let before = fs::read(&other).unwrap();
+
+        let src = t.0.join("icon.png");
+        write_png(&src, 32, 32, ImageFormat::Png);
+        let name = install_icon(
+            &src,
+            &t.0.join("notes.desktop"),
+            &targets,
+            local_taken(&targets),
+        )
+        .unwrap();
+        assert_eq!(name, "notes-custom");
+        assert_eq!(fs::read(&other).unwrap(), before);
+    }
+
+    #[test]
+    fn an_unrelated_file_with_the_image_name_is_not_overwritten() {
+        let t = Tmp::new("keep-original");
+        let targets = t.targets();
+        fs::create_dir_all(&targets.icons_dir).unwrap();
+        let unrelated = targets.icons_dir.join("icon.png");
+        fs::write(&unrelated, b"someone else's picture").unwrap();
+
+        let src = t.0.join("icon.png");
+        write_png(&src, 32, 32, ImageFormat::Png);
+        let name = install_icon(
+            &src,
+            &t.0.join("notes.desktop"),
+            &targets,
+            local_taken(&targets),
+        )
+        .unwrap();
+        assert_eq!(name, "notes");
+        assert_eq!(fs::read(&unrelated).unwrap(), b"someone else's picture");
+        assert!(image::image_dimensions(&targets.icons_dir.join("notes.png")).is_ok());
+    }
+
+    #[test]
+    fn suffixes_escalate_until_the_name_is_free() {
+        let t = Tmp::new("escalate");
+        let src = t.0.join("icon.png");
+        write_png(&src, 32, 32, ImageFormat::Png);
+        let name = install_icon(
+            &src,
+            &t.0.join("notes.desktop"),
+            &t.targets(),
+            |n| n == "notes" || n == "notes-custom",
+        )
+        .unwrap();
+        assert_eq!(name, "notes-custom-2");
     }
 
     #[test]
@@ -278,7 +397,7 @@ mod tests {
         fs::create_dir_all(&targets.icons_dir).unwrap();
         let src = targets.icons_dir.join("a.png");
         write_png(&src, 16, 16, ImageFormat::Png);
-        install_icon(&src, &targets, |_| false).unwrap();
+        install_icon(&src, &t.0.join("a.desktop"), &targets, |_| false).unwrap();
         assert!(fs::metadata(&src).unwrap().len() > 0);
     }
 }
