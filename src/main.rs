@@ -235,6 +235,19 @@ fn key_value(line: &str) -> Option<(&str, &str)> {
     Some((k.trim(), v.trim_start()))
 }
 
+/// Reapply unsaved changes to an entry freshly loaded from disk. Refresh
+/// re-scans the folders, but it must not silently act as Discard: an icon
+/// that was just installed is in the theme even though `Icon=` isn't saved.
+fn carry_over_edits(mut fresh: DesktopEntry, previous: &[DesktopEntry]) -> DesktopEntry {
+    if let Some(old) = previous.iter().find(|e| e.path == fresh.path && e.modified) {
+        fresh.icon_value = old.icon_value.clone();
+        fresh.startup_wm_class = old.startup_wm_class.clone();
+        fresh.modified = true;
+        fresh.status = old.status.clone();
+    }
+    fresh
+}
+
 /// The user-level launcher that shadows `path`, if `path` isn't already there.
 fn local_application_path(home: &Path, path: &Path) -> Option<PathBuf> {
     let dir = home.join(".local/share/applications");
@@ -441,7 +454,11 @@ impl IconManagerApp {
     fn refresh_entries(&mut self) {
         self.icon_index = icons::IconIndex::for_desktop();
         self.icon_textures.clear();
-        self.entries.clear();
+        let previous = std::mem::take(&mut self.entries);
+        let selected_path = self
+            .selected
+            .and_then(|i| previous.get(i))
+            .map(|e| e.path.clone());
         self.selected = None;
         self.global_status = String::new();
 
@@ -480,13 +497,19 @@ impl IconManagerApp {
                 seen_filenames.insert(fname);
 
                 if let Some(entry) = DesktopEntry::load(path) {
-                    self.entries.push(entry);
+                    self.entries.push(carry_over_edits(entry, &previous));
                 }
             }
         }
 
         // Sort all entries alphabetically by name
         self.entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        // Reloading is not a Discard: keep the panel on the same launcher if
+        // it still exists, including when its edits were carried over.
+        self.selected = selected_path
+            .as_deref()
+            .and_then(|path| self.entries.iter().position(|e| e.path == path));
 
         self.global_status = format!(
             "Loaded {} entries from {} director{}",
@@ -1672,6 +1695,40 @@ mod tests {
     }
 
     const PWA: &str = "com.google.Chrome.flextop.chrome-abc-Default.desktop";
+
+    fn draft(path: &str, icon: &str, modified: bool) -> DesktopEntry {
+        DesktopEntry {
+            path: PathBuf::from(path),
+            name: "App".into(),
+            icon_value: icon.into(),
+            is_chrome_pwa: false,
+            chrome_app_id: None,
+            startup_wm_class: Some("wm-class".into()),
+            modified,
+            status: Some("✔ Icon set, save to apply".into()),
+        }
+    }
+
+    #[test]
+    fn refresh_carries_unsaved_edits_onto_the_fresh_entry() {
+        let fresh = draft("/apps/app.desktop", "old-icon", false);
+        let old = draft("/apps/app.desktop", "new-icon", true);
+        let carried = carry_over_edits(fresh, &[old]);
+        assert_eq!(carried.icon_value, "new-icon");
+        assert_eq!(carried.startup_wm_class.as_deref(), Some("wm-class"));
+        assert!(carried.modified);
+        assert_eq!(carried.status.as_deref(), Some("✔ Icon set, save to apply"));
+    }
+
+    #[test]
+    fn refresh_does_not_copy_saved_or_unrelated_entries() {
+        let fresh = draft("/apps/app.desktop", "on-disk", false);
+        let saved = draft("/apps/app.desktop", "saved-but-cleared", false);
+        let other = draft("/apps/other.desktop", "another-app", true);
+        let carried = carry_over_edits(fresh, &[saved, other]);
+        assert_eq!(carried.icon_value, "on-disk");
+        assert!(!carried.modified);
+    }
 
     #[test]
     fn saving_a_pwa_without_wm_class_adds_no_empty_key() {
