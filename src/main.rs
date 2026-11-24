@@ -23,6 +23,14 @@ use theme::Palette;
 // Data structures
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Where a save ended up: in place, or in a local copy that shadows a
+/// read-only system entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveLocation {
+    Original,
+    LocalCopy(PathBuf),
+}
+
 #[derive(Debug, Clone)]
 struct DesktopEntry {
     /// Absolute path to the .desktop file
@@ -100,7 +108,13 @@ impl DesktopEntry {
     }
 
     /// Write changes back to the .desktop file.
-    fn save(&mut self) -> Result<(), String> {
+    fn save(&mut self) -> Result<SaveLocation, String> {
+        self.save_to_home(&dirs_next())
+    }
+
+    /// The save implementation, with the home directory passed in so tests
+    /// can exercise the read-only-system-entry fallback in a temp folder.
+    fn save_to_home(&mut self, home: &Path) -> Result<SaveLocation, String> {
         let content =
             fs::read_to_string(&self.path).map_err(|e| format!("Read error: {e}"))?;
 
@@ -180,10 +194,32 @@ impl DesktopEntry {
         }
 
         let new_content = new_lines.join("\n") + "\n";
-        write_atomic(&self.path, &new_content).map_err(|e| format!("Write error: {e}"))?;
+        let denied = match write_atomic(&self.path, &new_content) {
+            Ok(()) => {
+                self.modified = false;
+                self.status = Some("✔ Saved".to_string());
+                return Ok(SaveLocation::Original);
+            }
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => e,
+            Err(e) => return Err(format!("Write error: {e}")),
+        };
+
+        // A root-owned /usr/share/applications entry can't be written, but a
+        // file of the same name in ~/.local/share/applications shadows it.
+        let local = local_application_path(home, &self.path)
+            .ok_or_else(|| format!("Write error: {denied}"))?;
+        if let Some(parent) = local.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Write error: {denied}; could not create {}: {e}", parent.display()))?;
+        }
+        write_atomic(&local, &new_content).map_err(|e| {
+            format!("Write error: {denied}; local copy at {} also failed: {e}", local.display())
+        })?;
+
+        self.path = local.clone();
         self.modified = false;
-        self.status = Some("✔ Saved".to_string());
-        Ok(())
+        self.status = Some(format!("✔ Saved to {}", local.display()));
+        Ok(SaveLocation::LocalCopy(local))
     }
 
     /// The StartupWMClass to add when the file has none: never an empty one.
@@ -197,6 +233,15 @@ impl DesktopEntry {
 fn key_value(line: &str) -> Option<(&str, &str)> {
     let (k, v) = line.split_once('=')?;
     Some((k.trim(), v.trim_start()))
+}
+
+/// The user-level launcher that shadows `path`, if `path` isn't already there.
+fn local_application_path(home: &Path, path: &Path) -> Option<PathBuf> {
+    let dir = home.join(".local/share/applications");
+    if path.parent() == Some(dir.as_path()) {
+        return None;
+    }
+    Some(dir.join(path.file_name()?))
 }
 
 /// Write a file by creating a temporary file beside it and renaming it over
@@ -708,8 +753,12 @@ impl IconManagerApp {
     }
 
     fn save_entry(&mut self, sel: usize) {
+        let name = self.entries[sel].name.clone();
         match self.entries[sel].save() {
-            Ok(()) => self.global_status = format!("Saved {}", self.entries[sel].name),
+            Ok(SaveLocation::Original) => self.global_status = format!("Saved {name}"),
+            Ok(SaveLocation::LocalCopy(path)) => {
+                self.global_status = format!("Saved a local copy of {name}: {}", path.display());
+            }
             Err(e) => self.entries[sel].status = Some(format!("✖ {e}")),
         }
     }
@@ -1646,6 +1695,40 @@ mod tests {
         );
         assert!(fs::read_to_string(&p).unwrap().contains("Icon=new"));
         let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn a_read_only_system_entry_is_saved_as_a_local_copy() {
+        let home = std::env::temp_dir().join(format!("dim-home-{}", std::process::id()));
+        let system = home.join("system");
+        fs::create_dir_all(&system).unwrap();
+        let p = system.join("app.desktop");
+        fs::write(&p, "[Desktop Entry]\nName=App\nIcon=old\n").unwrap();
+
+        let mut e = DesktopEntry::load(p.clone()).unwrap();
+        e.icon_value = "new".into();
+        let perms = fs::metadata(&system).unwrap().permissions();
+        fs::set_permissions(&system, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = e.save_to_home(&home);
+        fs::set_permissions(&system, perms).unwrap();
+
+        let local = home.join(".local/share/applications/app.desktop");
+        assert_eq!(result.unwrap(), SaveLocation::LocalCopy(local.clone()));
+        assert_eq!(e.path, local);
+        assert!(fs::read_to_string(&local).unwrap().contains("Icon=new"));
+        assert!(fs::read_to_string(&p).unwrap().contains("Icon=old"));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_local_launcher_is_not_given_a_second_local_copy() {
+        let home = PathBuf::from("/home/someone");
+        let p = home.join(".local/share/applications/app.desktop");
+        assert_eq!(local_application_path(&home, &p), None);
+        assert_eq!(
+            local_application_path(&home, Path::new("/usr/share/applications/app.desktop")),
+            Some(p)
+        );
     }
 
     #[test]

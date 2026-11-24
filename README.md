@@ -217,7 +217,7 @@ application name, current `Icon=` value, and flags (e.g. `[PWA]`).
    - Shows the detected App ID slug
    - Editable `StartupWMClass=` field
    - **⚡ Auto-fill** sets `StartupWMClass` from the original icon value
-5. **💾 Save** -writes changes back to the `.desktop` file
+5. **💾 Save** -writes changes back to the `.desktop` file (a root-owned system entry is saved as a local copy that shadows it)
 6. **↩ Discard** -reloads the entry from disk
 
 ### Configuring the icons directory
@@ -267,11 +267,11 @@ If the same filename exists in more than one directory, the first match wins
 | `/usr/share/applications` | System-wide apps |
 | `/usr/local/share/applications` | Locally compiled/installed apps |
 
-> **Note:** Entries from `/usr/share/applications` are owned by root. The app
-> can display and edit their values in the UI, but saving will fail without
-> root privileges. To safely edit a system entry, copy it to
-> `~/.local/share/applications/` first -your local copy will automatically
-> shadow the system one.
+> **Note:** Entries from `/usr/share/applications` are owned by root. If you
+> save one without root privileges, the app writes to
+> `~/.local/share/applications/<same name>` instead. That local copy shadows
+> the system entry, so the change takes effect immediately and the original is
+> left untouched.
 
 ---
 
@@ -307,13 +307,9 @@ these rather than the binary itself.
 
 **Permission denied when saving a system entry**
 
-Copy the `.desktop` file to your local applications directory first:
-
-```bash
-cp /usr/share/applications/<file>.desktop ~/.local/share/applications/
-```
-
-Then edit it in the app -the local copy shadows the system one automatically.
+Nothing to do: saving a root-owned entry automatically writes it to
+`~/.local/share/applications/<file>.desktop`, which shadows the system one.
+The status bar tells you where the copy was saved.
 
 ---
 
