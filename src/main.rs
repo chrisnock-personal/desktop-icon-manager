@@ -496,17 +496,34 @@ impl IconManagerApp {
         );
     }
 
-    /// Install an image into the icon theme and return its theme name.
-    fn import_icon(&self, source: &Path) -> Result<String, String> {
+    /// Install an image as `entry`'s icon and return its theme name.
+    fn import_icon(&self, source: &Path, entry: &Path) -> Result<String, String> {
         let targets = install::Targets::for_user(&self.icons_dir);
-        let ours = [targets.hicolor.clone(), targets.pixmaps.clone()];
-        // A name that resolves to someone else's icon (a system theme's
-        // `firefox`) is taken: installing over it would change that app too.
-        let taken = |name: &str| {
-            icons::resolve_icon_path(name, &self.icon_index)
-                .is_some_and(|p| !ours.iter().any(|o| p.starts_with(o)))
+        let ours = |p: &Path| {
+            [&targets.hicolor, &targets.pixmaps, &targets.icons_dir]
+                .iter()
+                .any(|dir| p.starts_with(dir))
         };
-        install::install_icon(source, &targets, taken)
+        let current_is_ours = self
+            .entries
+            .iter()
+            .find(|e| e.path == entry)
+            .and_then(|e| icons::resolve_icon_path(&e.icon_value, &self.icon_index))
+            .is_some_and(|p| ours(&p));
+
+        // Names are taken by icons in system themes *and* by icons another
+        // app put in the user's folders. Re-importing the entry's own current
+        // name is the one case where overwriting is safe.
+        let taken = |name: &str| {
+            let files = install::installed_files(&targets, name);
+            if current_is_ours && files.iter().any(|p| ours(p) && p.exists()) {
+                return false;
+            }
+            files.iter().any(|p| p.exists())
+                || icons::resolve_icon_path(name, &self.icon_index)
+                    .is_some_and(|p| !ours(&p))
+        };
+        install::install_icon(source, entry, &targets, taken)
     }
 
     fn load_icon_texture(
@@ -1562,7 +1579,7 @@ impl IconManagerApp {
             self.global_status = "The entry was reloaded while choosing; pick the image again".into();
             return;
         };
-        match self.import_icon(file) {
+        match self.import_icon(file, entry) {
             Ok(theme_name) => {
                 // The new icon is now in the theme: re-index and drop
                 // cached previews so it (and anything it replaced) reloads.

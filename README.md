@@ -87,15 +87,18 @@ When you upload an icon, the tool does the following automatically:
 1. Copies the original file to your icons directory (`~/Pictures/Icons/` by default)
 2. Rasterises it (padded to a square) to every standard size and installs into
    `~/.local/share/icons/hicolor/<size>x<size>/apps/`, or installs an SVG into
-   `hicolor/scalable/apps/`, replacing whatever an earlier upload of the same name left there
+   `hicolor/scalable/apps/`
 3. Writes a fallback to `~/.local/share/pixmaps/`
 4. Runs `gtk-update-icon-cache` so the change takes effect immediately
 5. Sets `Icon=` to the **bare theme name** (e.g. `myapp`) rather than a file path
 
-The theme name comes from the image's file name. If another app's icon
-already has that name (say you upload `firefox.png`), `-custom` is added
-(`firefox-custom`), so the other app's icon isn't replaced too. An image
-that can't be read is reported as an error and nothing is installed.
+The theme name comes from the **`.desktop` entry's filename**, not the image's,
+so picking `icon.png` for two apps gives them two different names. If the name
+is already used by another app's icon -in a system theme or in your own icon
+folders - `-custom` (then `-custom-2`, …) is added, so that icon is left alone.
+The original is kept in the icons folder under the theme name, so it can't
+overwrite an unrelated file with the same image filename. An image that can't
+be read is reported as an error and nothing is installed.
 
 This ensures icons appear correctly everywhere -in the file manager, dock,
 app launcher, alt-tab switcher, and taskbar.
