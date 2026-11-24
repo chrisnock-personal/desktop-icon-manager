@@ -4,13 +4,13 @@ use egui::{
     Align, Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Rounding, ScrollArea,
     Sense, Stroke, Vec2,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 mod icon_data;
 mod icons;
@@ -248,6 +248,18 @@ fn carry_over_edits(mut fresh: DesktopEntry, previous: &[DesktopEntry]) -> Deskt
     fresh
 }
 
+/// Mark `key` as most recently used and return the key pushed out of the
+/// bounded texture cache, if any.
+fn touch_texture_order(order: &mut VecDeque<String>, key: &str) -> Option<String> {
+    order.retain(|k| k != key);
+    order.push_back(key.to_string());
+    if order.len() > MAX_ICON_TEXTURES {
+        order.pop_front()
+    } else {
+        None
+    }
+}
+
 /// The theme name an `Icon=` value refers to: the value itself for a bare
 /// name (which may contain dots, like `org.gnome.Foo`), or the file stem for
 /// a path to a file.
@@ -369,6 +381,11 @@ struct IconTexture {
     symbolic: bool,
 }
 
+/// How long an Icon= edit must settle before its preview is decoded.
+const PREVIEW_DELAY: Duration = Duration::from_millis(250);
+/// A long editing session must not leave a texture for every partial value.
+const MAX_ICON_TEXTURES: usize = 96;
+
 #[derive(Default)]
 struct IconManagerApp {
     entries: Vec<DesktopEntry>,
@@ -390,6 +407,15 @@ struct IconManagerApp {
     logo: Option<egui::TextureHandle>,
     /// Decoded icon previews by Icon= value; None caches "no preview"
     icon_textures: HashMap<String, Option<IconTexture>>,
+    /// Least-recently-used order of `icon_textures`, to bound the cache.
+    texture_order: VecDeque<String>,
+    /// Icon= value used for the detail preview. It lags behind typing so a
+    /// partial path or name isn't looked up and decoded on every keystroke.
+    preview_value: String,
+    /// Launcher the preview belongs to, so switching entries resets it.
+    preview_owner: Option<PathBuf>,
+    /// When a pending Icon= edit should become the preview value.
+    preview_due: Option<Instant>,
     /// Every icon in the desktop's icon themes, for resolving Icon= names
     icon_index: icons::IconIndex,
     /// Icons folder (absolute path): default ~/Pictures/Icons, user-editable
@@ -466,7 +492,7 @@ impl IconManagerApp {
 
     fn refresh_entries(&mut self) {
         self.icon_index = icons::IconIndex::for_desktop();
-        self.icon_textures.clear();
+        self.clear_textures();
         let previous = std::mem::take(&mut self.entries);
         let selected_path = self
             .selected
@@ -574,6 +600,7 @@ impl IconManagerApp {
             return None;
         }
         if let Some(cached) = self.icon_textures.get(icon_value) {
+            touch_texture_order(&mut self.texture_order, icon_value);
             return cached.clone();
         }
         let loaded = icons::resolve_icon_path(icon_value, &self.icon_index)
@@ -582,8 +609,64 @@ impl IconManagerApp {
                 tex: ctx.load_texture(icon_value, icon.image, egui::TextureOptions::LINEAR),
                 symbolic: icon.symbolic,
             });
+        if let Some(old) = touch_texture_order(&mut self.texture_order, icon_value) {
+            self.icon_textures.remove(&old);
+        }
+        while self.texture_order.len() > MAX_ICON_TEXTURES {
+            if let Some(old) = self.texture_order.pop_front() {
+                self.icon_textures.remove(&old);
+            }
+        }
         self.icon_textures.insert(icon_value.to_string(), loaded.clone());
         loaded
+    }
+
+    /// The value whose preview should be shown for a card or row: the open
+    /// entry uses the settled value while its Icon= field is being typed in.
+    fn preview_value_for(&self, idx: usize) -> String {
+        let entry = &self.entries[idx];
+        if self.selected == Some(idx)
+            && self.preview_owner.as_deref() == Some(entry.path.as_path())
+        {
+            self.preview_value.clone()
+        } else {
+            entry.icon_value.clone()
+        }
+    }
+
+    /// Commit a settled edit to the preview, scheduling a repaint if the
+    /// timer hasn't expired yet (egui doesn't repaint on its own while idle).
+    fn tick_preview(&mut self, ctx: &egui::Context) {
+        if let Some(due) = self.preview_due {
+            if Instant::now() >= due {
+                self.commit_preview();
+            } else {
+                ctx.request_repaint_after(due - Instant::now());
+            }
+        }
+    }
+
+    fn commit_preview(&mut self) {
+        self.preview_due = None;
+        if let Some(sel) = self.selected.filter(|&s| s < self.entries.len()) {
+            let entry = &self.entries[sel];
+            if self.preview_owner.as_deref() == Some(entry.path.as_path()) {
+                self.preview_value = entry.icon_value.clone();
+            }
+        }
+    }
+
+    /// Show a launcher's on-disk icon immediately (select, save, discard,
+    /// picker); only typing is debounced.
+    fn sync_preview(&mut self, sel: usize) {
+        self.preview_value = self.entries[sel].icon_value.clone();
+        self.preview_owner = Some(self.entries[sel].path.clone());
+        self.preview_due = None;
+    }
+
+    fn clear_textures(&mut self) {
+        self.icon_textures.clear();
+        self.texture_order.clear();
     }
 }
 
@@ -745,6 +828,7 @@ fn paint_shadow(ui: &egui::Ui, p: &Palette, rect: Rect, rounding: f32, lift: f32
 impl eframe::App for IconManagerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_picker();
+        self.tick_preview(ctx);
         self.handle_shortcuts(ctx);
         self.draw_header(ctx);
         self.draw_status_bar(ctx);
@@ -817,6 +901,7 @@ impl IconManagerApp {
             }
             Err(e) => self.entries[sel].status = Some(format!("✖ {e}")),
         }
+        self.sync_preview(sel);
     }
 
     fn discard_entry(&mut self, sel: usize) {
@@ -824,6 +909,7 @@ impl IconManagerApp {
         if let Some(fresh) = DesktopEntry::load(path) {
             self.entries[sel] = fresh;
         }
+        self.sync_preview(sel);
     }
 
     fn matches(&self, e: &DesktopEntry, needle: &str) -> bool {
@@ -1127,7 +1213,7 @@ impl IconManagerApp {
         if !ui.is_rect_visible(rect) {
             return;
         }
-        let icon_value = self.entries[idx].icon_value.clone();
+        let icon_value = self.preview_value_for(idx);
         let tex = self.load_icon_texture(ctx, &icon_value);
         let e = &self.entries[idx];
         let selected = self.selected == Some(idx);
@@ -1367,6 +1453,9 @@ impl IconManagerApp {
 
     fn draw_detail_body(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, sel: usize) {
         let p = self.palette;
+        if self.preview_owner.as_deref() != Some(self.entries[sel].path.as_path()) {
+            self.sync_preview(sel);
+        }
 
         ui.horizontal(|ui| {
             section_label(ui, &p, "Edit entry");
@@ -1383,7 +1472,7 @@ impl IconManagerApp {
         ui.add_space(8.0);
 
         // ── Hero: big icon, name, file name ─────────────────────────────────
-        let icon_value = self.entries[sel].icon_value.clone();
+        let icon_value = self.preview_value_for(sel);
         let tex = self.load_icon_texture(ctx, &icon_value);
         let e = &self.entries[sel];
         let name = e.name.clone();
@@ -1429,21 +1518,31 @@ impl IconManagerApp {
         // ── Icon ────────────────────────────────────────────────────────────
         section_label(ui, &p, "Icon");
         ui.add_space(2.0);
-        let icon_changed = {
+        let (icon_changed, committed) = {
             let entry = &mut self.entries[sel];
             let before = entry.icon_value.clone();
-            ui.add(
+            let response = ui.add(
                 egui::TextEdit::singleline(&mut entry.icon_value)
                     .desired_width(f32::INFINITY)
                     .font(FontId::monospace(13.0))
                     .margin(egui::vec2(10.0, 8.0))
                     .hint_text("Theme name (e.g. firefox) or absolute path"),
             );
-            entry.icon_value != before
+            // Enter and focus-loss are deliberate commits; don't make the
+            // user wait for the typing debounce in that case.
+            let enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
+            let committed = (enter && response.has_focus()) || response.lost_focus();
+            (entry.icon_value != before, committed)
         };
         if icon_changed {
             self.entries[sel].modified = true;
             self.entries[sel].status = None;
+            if committed {
+                self.preview_value = self.entries[sel].icon_value.clone();
+                self.preview_due = None;
+            } else {
+                self.preview_due = Some(Instant::now() + PREVIEW_DELAY);
+            }
         }
 
         ui.add_space(6.0);
@@ -1623,12 +1722,13 @@ impl IconManagerApp {
                 // The new icon is now in the theme: re-index and drop
                 // cached previews so it (and anything it replaced) reloads.
                 self.icon_index = icons::IconIndex::for_desktop();
-                self.icon_textures.clear();
+                self.clear_textures();
 
                 self.entries[sel].icon_value = theme_name.clone();
                 self.entries[sel].modified = true;
                 self.entries[sel].status =
                     Some(format!("✔ Icon set to \"{theme_name}\", save to apply"));
+                self.sync_preview(sel);
                 self.global_status = format!(
                     "Installed icon \"{theme_name}\"; the dock and launcher update on save"
                 );
@@ -1701,6 +1801,7 @@ fn load_app_icon() -> egui::IconData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn entry_file(tag: &str, name: &str, content: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("dim-save-{tag}-{}", std::process::id()));
@@ -1732,6 +1833,28 @@ mod tests {
             modified,
             status: Some("✔ Icon set, save to apply".into()),
         }
+    }
+
+    #[test]
+    fn the_texture_cache_forgets_the_least_recently_used_icon() {
+        let mut order: VecDeque<String> = (0..MAX_ICON_TEXTURES)
+            .map(|i| format!("icon-{i}"))
+            .collect();
+        let evicted = touch_texture_order(&mut order, "fresh");
+        assert_eq!(evicted.as_deref(), Some("icon-0"));
+        assert_eq!(order.len(), MAX_ICON_TEXTURES);
+        assert_eq!(order.back().unwrap(), "fresh");
+        assert!(!order.iter().any(|k| k == "icon-0"));
+    }
+
+    #[test]
+    fn touching_a_cached_icon_moves_it_to_the_back() {
+        let mut order: VecDeque<String> = (0..MAX_ICON_TEXTURES - 1)
+            .map(|i| format!("icon-{i}"))
+            .collect();
+        assert_eq!(touch_texture_order(&mut order, "icon-0"), None);
+        assert_eq!(order.back().unwrap(), "icon-0");
+        assert_eq!(order.len(), MAX_ICON_TEXTURES - 1);
     }
 
     #[test]
