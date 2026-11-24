@@ -204,7 +204,7 @@ SKIP_DEPS=1 ./build.sh
 The app lists all discovered `.desktop` entries with their icon thumbnail,
 application name, current `Icon=` value, and flags (e.g. `[PWA]`).
 
-- **Refresh** -re-scans all application directories
+- **Refresh** -re-scans all application directories, keeping any unsaved edits (use **Discard** to drop them)
 - **Filter** -search by app name or icon value
 - **Chrome PWAs only** -toggle to show only detected PWA entries
 - Click any row to open the **Edit panel**
