@@ -6,7 +6,10 @@ use egui::{
 };
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 
 mod icon_data;
@@ -177,7 +180,7 @@ impl DesktopEntry {
         }
 
         let new_content = new_lines.join("\n") + "\n";
-        fs::write(&self.path, new_content).map_err(|e| format!("Write error: {e}"))?;
+        write_atomic(&self.path, &new_content).map_err(|e| format!("Write error: {e}"))?;
         self.modified = false;
         self.status = Some("✔ Saved".to_string());
         Ok(())
@@ -194,6 +197,51 @@ impl DesktopEntry {
 fn key_value(line: &str) -> Option<(&str, &str)> {
     let (k, v) = line.split_once('=')?;
     Some((k.trim(), v.trim_start()))
+}
+
+/// Write a file by creating a temporary file beside it and renaming it over
+/// the original. A crash or a full disk can then leave either the old file or
+/// the new one, never a truncated launcher that disappears from the menu.
+///
+/// The original's permissions are copied to the temporary file: Chrome's PWA
+/// launchers are executable, and `fs::write` on a new file would drop that.
+fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
+    let permissions = fs::metadata(path).ok().map(|m| m.permissions());
+
+    for offset in 0..100 {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(offset);
+        let tmp = dir.join(format!(".{}.tmp-{}-{}", name.to_string_lossy(), std::process::id(), seq));
+        let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+
+        let result = (|| {
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            if let Some(permissions) = permissions {
+                fs::set_permissions(&tmp, permissions)?;
+            }
+            drop(file);
+            fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a temporary file beside the launcher",
+    ))
 }
 
 /// Returns (is_chrome_pwa, Option<chrome_app_id_slug>).
@@ -1578,6 +1626,41 @@ mod tests {
         e.startup_wm_class = Some(String::new());
         e.save().unwrap();
         assert!(!fs::read_to_string(&p).unwrap().contains("StartupWMClass"));
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn saving_keeps_an_executable_launcher_executable() {
+        let p = entry_file(
+            "executable",
+            "app.desktop",
+            "[Desktop Entry]\nName=App\nIcon=old\n",
+        );
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut e = DesktopEntry::load(p.clone()).unwrap();
+        e.icon_value = "new".into();
+        e.save().unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(fs::read_to_string(&p).unwrap().contains("Icon=new"));
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn saving_leaves_no_temporary_files_behind() {
+        let p = entry_file("clean", "app.desktop", "[Desktop Entry]\nName=App\nIcon=old\n");
+        let mut e = DesktopEntry::load(p.clone()).unwrap();
+        e.icon_value = "new".into();
+        e.save().unwrap();
+        let leftovers: Vec<_> = fs::read_dir(p.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "app.desktop")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = fs::remove_dir_all(p.parent().unwrap());
     }
 
