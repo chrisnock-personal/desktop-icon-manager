@@ -15,6 +15,10 @@ use crate::dirs_next;
 /// Size icons are decoded at: large enough for the detail panel's hero icon.
 pub const ICON_TEXTURE_SIZE: u32 = 128;
 
+/// Never read a whole file into memory just to sniff it for a preview: an
+/// `Icon=` value can be a path to an ISO or a video.
+pub const MAX_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Image formats the preview can decode.
 const EXTENSIONS: [&str; 2] = ["png", "svg"];
 
@@ -144,6 +148,11 @@ pub struct DecodedIcon {
 
 /// Decode a PNG, JPEG, SVG (and so on) to fit in ICON_TEXTURE_SIZE.
 pub fn decode(path: &Path) -> Option<DecodedIcon> {
+    // Check the size before reading: `fs::read` of a large file would freeze
+    // the UI even if we decided not to decode it afterwards.
+    if fs::metadata(path).ok()?.len() > MAX_PREVIEW_BYTES {
+        return None;
+    }
     let bytes = fs::read(path).ok()?;
     // Decide by content, not extension: AppImage integrations often write
     // icons with no extension at all.
@@ -436,6 +445,19 @@ mod tests {
         assert_eq!(resolve_icon_path("b", &index), Some(want_b.clone()));
         // A theme name written with an extension still resolves.
         assert_eq!(resolve_icon_path("b.png", &index), Some(want_b));
+    }
+
+    #[test]
+    fn oversized_files_are_not_read_for_a_preview() {
+        let t = Tree::new("large");
+        let p = t.file("big.png");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_len(MAX_PREVIEW_BYTES + 1)
+            .unwrap();
+        assert!(decode(&p).is_none());
     }
 
     #[test]
