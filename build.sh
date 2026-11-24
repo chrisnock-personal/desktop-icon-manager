@@ -135,11 +135,19 @@ echo "✓  Built: $BINARY  ($(du -sh "$BINARY" | cut -f1))"
 echo ""
 
 # ── 5. Install binary ────────────────────────────────────────────────────────
-read -r -p "➤  Install binary to $INSTALL_DIR? [Y/n]: " REPLY
+# `|| true`: with no terminal (piped, CI) read fails, and set -e would stop
+# the script there; the default answer is used instead.
+read -r -p "➤  Install binary to $INSTALL_DIR? [Y/n]: " REPLY || true
 REPLY="${REPLY:-Y}"
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+# The launcher runs the installed binary, or the one just built if declined.
+LAUNCH="$BINARY"
+if [[ $REPLY =~ ^[Yy] ]]; then
     mkdir -p "$INSTALL_DIR"
-    cp "$BINARY" "$INSTALL_DIR/"
+    # Copy then rename: copying straight over the binary fails with "Text
+    # file busy" while the app is open.
+    cp "$BINARY" "$INSTALL_DIR/.$BINARY_NAME.new"
+    mv -f "$INSTALL_DIR/.$BINARY_NAME.new" "$INSTALL_DIR/$BINARY_NAME"
+    LAUNCH="$INSTALL_DIR/$BINARY_NAME"
     echo "✓  Copied binary to $INSTALL_DIR/$BINARY_NAME"
     if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
         echo ""
@@ -201,15 +209,15 @@ fi
 echo ""
 
 # ── 7. Create launcher .desktop file ─────────────────────────────────────────
-read -r -p "➤  Create application launcher (.desktop file)? [Y/n]: " REPLY2
+read -r -p "➤  Create application launcher (.desktop file)? [Y/n]: " REPLY2 || true
 REPLY2="${REPLY2:-Y}"
-if [[ $REPLY2 =~ ^[Yy]$ ]]; then
+if [[ $REPLY2 =~ ^[Yy] ]]; then
     mkdir -p "$DESKTOP_DIR"
     cat > "$DESKTOP_DIR/$BINARY_NAME.desktop" <<EOF
 [Desktop Entry]
 Name=Desktop Icon Manager
 Comment=Manage icons for Linux .desktop application entries
-Exec=$INSTALL_DIR/$BINARY_NAME
+Exec=$LAUNCH
 Icon=$ICON_NAME
 Terminal=false
 Type=Application

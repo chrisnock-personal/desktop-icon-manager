@@ -42,6 +42,7 @@ jobs:
           name="desktop-icon-manager-${GITHUB_REF_NAME}-x86_64-linux"
           mkdir -p "dist/$name"
           cp target/release/desktop-icon-manager install-icons.sh README.md "dist/$name/"
+          chmod +x "dist/$name/desktop-icon-manager" "dist/$name/install-icons.sh"
           cp -r assets "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")

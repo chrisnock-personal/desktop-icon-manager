@@ -55,10 +55,14 @@ echo "✓  Icons installed"
 echo "➤  Installing binary…"
 if [ -f "$BINARY" ]; then
     mkdir -p "$INSTALL_DIR"
-    cp "$BINARY" "$INSTALL_DIR/"
+    # Copy then rename: copying straight over the binary fails with "Text
+    # file busy" while the app is open, which stopped the install here.
+    cp "$BINARY" "$INSTALL_DIR/.desktop-icon-manager.new"
+    mv -f "$INSTALL_DIR/.desktop-icon-manager.new" "$INSTALL_DIR/desktop-icon-manager"
     echo "✓  Binary copied to $INSTALL_DIR/desktop-icon-manager"
 else
-    echo "⚠  Binary not found at $BINARY -run 'cargo build --release' first"
+    echo "✗  Binary not found at $BINARY -run 'cargo build --release' first"
+    exit 1
 fi
 
 # Create .desktop launcher
