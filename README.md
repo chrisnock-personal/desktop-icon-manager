@@ -85,10 +85,17 @@ it copies the detected app-ID slug into `StartupWMClass` for you.
 When you upload an icon, the tool does the following automatically:
 
 1. Copies the original file to your icons directory (`~/Pictures/Icons/` by default)
-2. Rasterises it to every standard size and installs into `~/.local/share/icons/hicolor/<size>x<size>/apps/`
-3. Copies a fallback to `~/.local/share/pixmaps/`
+2. Rasterises it (padded to a square) to every standard size and installs into
+   `~/.local/share/icons/hicolor/<size>x<size>/apps/`, or installs an SVG into
+   `hicolor/scalable/apps/`, replacing whatever an earlier upload of the same name left there
+3. Writes a fallback to `~/.local/share/pixmaps/`
 4. Runs `gtk-update-icon-cache` so the change takes effect immediately
 5. Sets `Icon=` to the **bare theme name** (e.g. `myapp`) rather than a file path
+
+The theme name comes from the image's file name. If another app's icon
+already has that name (say you upload `firefox.png`), `-custom` is added
+(`firefox-custom`), so the other app's icon isn't replaced too. An image
+that can't be read is reported as an error and nothing is installed.
 
 This ensures icons appear correctly everywhere -in the file manager, dock,
 app launcher, alt-tab switcher, and taskbar.
@@ -240,7 +247,10 @@ desktop-icon-manager/
 │   └── icon_512.png
 └── src/
     ├── icon_data.rs     # Embedded app icon pixel data (auto-generated)
-    └── main.rs          # All application code
+    ├── icons.rs         # Finding and decoding icons for previews (theme lookup)
+    ├── install.rs       # Installing an uploaded image into the icon theme
+    ├── main.rs          # Desktop entries and the UI
+    └── theme.rs         # Light and dark palettes, fonts
 ```
 
 ---

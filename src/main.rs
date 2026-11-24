@@ -7,10 +7,11 @@ use egui::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 mod icon_data;
 mod icons;
+mod install;
 mod theme;
 
 use theme::Palette;
@@ -65,12 +66,11 @@ impl DesktopEntry {
             if !in_desktop_section {
                 continue;
             }
-            if let Some(v) = line.strip_prefix("Name=") {
-                name = v.to_string();
-            } else if let Some(v) = line.strip_prefix("Icon=") {
-                icon_value = v.to_string();
-            } else if let Some(v) = line.strip_prefix("StartupWMClass=") {
-                startup_wm_class = Some(v.to_string());
+            match key_value(line) {
+                Some(("Name", v)) => name = v.to_string(),
+                Some(("Icon", v)) => icon_value = v.to_string(),
+                Some(("StartupWMClass", v)) => startup_wm_class = Some(v.to_string()),
+                _ => {}
             }
         }
 
@@ -121,7 +121,7 @@ impl DesktopEntry {
                         new_lines.push(format!("Icon={}", self.icon_value));
                     }
                     if self.is_chrome_pwa && !wm_written {
-                        if let Some(ref wm) = self.startup_wm_class {
+                        if let Some(wm) = self.wm_class_to_write() {
                             new_lines.push(format!("StartupWMClass={wm}"));
                         }
                     }
@@ -132,19 +132,32 @@ impl DesktopEntry {
             }
 
             if in_desktop_section {
-                if trimmed.starts_with("Icon=") {
-                    new_lines.push(format!("Icon={}", self.icon_value));
-                    icon_written = true;
-                    continue;
-                }
-                if trimmed.starts_with("StartupWMClass=") && self.is_chrome_pwa {
-                    if let Some(ref wm) = self.startup_wm_class {
-                        new_lines.push(format!("StartupWMClass={wm}"));
-                    } else {
-                        new_lines.push(line.to_string());
+                match key_value(trimmed).map(|(k, _)| k) {
+                    // Only the first occurrence is rewritten; a duplicate
+                    // key is dropped rather than left with the old value.
+                    Some("Icon") => {
+                        if !icon_written {
+                            new_lines.push(format!("Icon={}", self.icon_value));
+                            icon_written = true;
+                        }
+                        continue;
                     }
-                    wm_written = true;
-                    continue;
+                    Some("StartupWMClass") if self.is_chrome_pwa => {
+                        match &self.startup_wm_class {
+                            // Untouched: keep the line as it was.
+                            None => new_lines.push(line.to_string()),
+                            // Cleared in the editor: remove the key.
+                            Some(wm) if wm.is_empty() => {}
+                            Some(wm) => {
+                                if !wm_written {
+                                    new_lines.push(format!("StartupWMClass={wm}"));
+                                }
+                            }
+                        }
+                        wm_written = true;
+                        continue;
+                    }
+                    _ => {}
                 }
             }
 
@@ -157,7 +170,7 @@ impl DesktopEntry {
                 new_lines.push(format!("Icon={}", self.icon_value));
             }
             if self.is_chrome_pwa && !wm_written {
-                if let Some(ref wm) = self.startup_wm_class {
+                if let Some(wm) = self.wm_class_to_write() {
                     new_lines.push(format!("StartupWMClass={wm}"));
                 }
             }
@@ -169,6 +182,18 @@ impl DesktopEntry {
         self.status = Some("✔ Saved".to_string());
         Ok(())
     }
+
+    /// The StartupWMClass to add when the file has none: never an empty one.
+    fn wm_class_to_write(&self) -> Option<&str> {
+        self.startup_wm_class.as_deref().filter(|s| !s.is_empty())
+    }
+}
+
+/// Split a `Key=Value` line. The spec allows spaces around `=`; localised
+/// keys (`Name[de]=`) keep their brackets, so they never match a plain key.
+fn key_value(line: &str) -> Option<(&str, &str)> {
+    let (k, v) = line.split_once('=')?;
+    Some((k.trim(), v.trim_start()))
 }
 
 /// Returns (is_chrome_pwa, Option<chrome_app_id_slug>).
@@ -256,6 +281,18 @@ struct IconManagerApp {
     /// Local (~/.local/share/applications) is first so it takes priority
     /// over system entries with the same filename.
     apps_dirs: Vec<PathBuf>,
+    /// An open file picker, running on its own thread. A picker run on the
+    /// UI thread stops the window answering the compositor; on Wayland that
+    /// can get the app disconnected (it just vanishes) while the picker is up.
+    picker: Option<mpsc::Receiver<Option<Picked>>>,
+}
+
+/// What a file picker returned, and what it was for.
+enum Picked {
+    /// An image for the entry whose .desktop file is `entry`.
+    Icon { entry: PathBuf, file: PathBuf },
+    /// A new icons folder.
+    Folder(PathBuf),
 }
 
 impl Default for Palette {
@@ -366,88 +403,17 @@ impl IconManagerApp {
         );
     }
 
-    /// Copy icon file to the configured icons directory and return the absolute path string.
-    /// Always uses an absolute path -~ is not expanded by desktop file parsers.
-    /// Copy icon to the icons dir, install into the XDG hicolor theme at all
-    /// standard sizes, and return the bare theme name (e.g. "myapp").
-    ///
-    /// Docks and app launchers (GNOME Shell, KDE Plasma, XFCE Panel …) look up
-    /// Icon= by theme name -a raw file path silently fails for pinned/running
-    /// dock entries even though it works fine in the file manager.
+    /// Install an image into the icon theme and return its theme name.
     fn import_icon(&self, source: &Path) -> Result<String, String> {
-        let filename = source
-            .file_name()
-            .ok_or("Invalid source filename")?
-            .to_string_lossy()
-            .to_string();
-
-        // Derive a clean theme name: strip extension, sanitise chars
-        let theme_name = source
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-            .collect::<String>()
-            .to_lowercase();
-
-        // 1. Copy original to the user's icons directory
-        let dest = self.icons_dir.join(&filename);
-
-        // If the picked file is already the destination (e.g. re-selecting an
-        // icon that was previously imported into icons_dir), skip the copy.
-        // fs::copy truncates the destination before reading the source, so
-        // copying a file onto itself would zero it out.
-        let source_is_dest = source
-            .canonicalize()
-            .ok()
-            .zip(dest.canonicalize().ok())
-            .is_some_and(|(s, d)| s == d);
-
-        if !source_is_dest {
-            fs::copy(source, &dest).map_err(|e| format!("Copy failed: {e}"))?;
-        }
-        let dest = dest.canonicalize()
-            .map_err(|e| format!("Could not resolve path: {e}"))?;
-
-        // 2. Install into ~/.local/share/icons/hicolor at every standard size
-        //    so docks, panels, and launchers can resolve the name correctly.
-        let home = dirs_next();
-        let hicolor_base = home.join(".local/share/icons/hicolor");
-        let pixmaps_dir  = home.join(".local/share/pixmaps");
-
-        let ext = source.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-
-        if ext == "svg" {
-            let svg_dir = hicolor_base.join("scalable/apps");
-            let _ = fs::create_dir_all(&svg_dir);
-            let _ = fs::copy(&dest, svg_dir.join(format!("{theme_name}.svg")));
-        } else {
-            if let Ok(img) = image::open(&dest) {
-                for size in [16u32, 32, 48, 64, 128, 256, 512] {
-                    let size_dir = hicolor_base.join(format!("{size}x{size}/apps"));
-                    let _ = fs::create_dir_all(&size_dir);
-                    let resized = img.resize(size, size, image::imageops::FilterType::Lanczos3);
-                    let _ = resized.save(size_dir.join(format!("{theme_name}.png")));
-                }
-            }
-        }
-
-        // Pixmaps fallback (Nautilus, some legacy DEs)
-        let _ = fs::create_dir_all(&pixmaps_dir);
-        let _ = fs::copy(&dest, pixmaps_dir.join(format!("{theme_name}.png")));
-
-        // 3. Flush the icon cache so the change takes effect immediately
-        let _ = std::process::Command::new("gtk-update-icon-cache")
-            .args(["-f", "-t"])
-            .arg(&hicolor_base)
-            .output();
-
-        // Return the bare theme name -NOT a file path
-        Ok(theme_name)
+        let targets = install::Targets::for_user(&self.icons_dir);
+        let ours = [targets.hicolor.clone(), targets.pixmaps.clone()];
+        // A name that resolves to someone else's icon (a system theme's
+        // `firefox`) is taken: installing over it would change that app too.
+        let taken = |name: &str| {
+            icons::resolve_icon_path(name, &self.icon_index)
+                .is_some_and(|p| !ours.iter().any(|o| p.starts_with(o)))
+        };
+        install::install_icon(source, &targets, taken)
     }
 
     fn load_icon_texture(
@@ -629,6 +595,7 @@ fn paint_shadow(ui: &egui::Ui, p: &Palette, rect: Rect, rounding: f32, lift: f32
 
 impl eframe::App for IconManagerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_picker();
         self.handle_shortcuts(ctx);
         self.draw_header(ctx);
         self.draw_status_bar(ctx);
@@ -883,24 +850,20 @@ impl IconManagerApp {
                     }
 
                     // Browse button: native folder picker
+                    let idle = self.picker.is_none();
                     if ui
-                        .add(secondary_button(&p, "Browse…").min_size(Vec2::new(0.0, 28.0)))
+                        .add_enabled(idle, secondary_button(&p, "Browse…").min_size(Vec2::new(0.0, 28.0)))
                         .on_hover_text("Browse for icon folder")
                         .clicked()
                     {
-                        if let Some(picked) = rfd::FileDialog::new()
-                            .set_title("Select Icons Folder")
-                            .set_directory(&self.icons_dir)
-                            .pick_folder()
-                        {
-                            if !picked.exists() {
-                                let _ = fs::create_dir_all(&picked);
-                            }
-                            self.icons_dir = picked;
-                            self.icons_dir_input = self.icons_dir.display().to_string();
-                            self.global_status =
-                                format!("Icon folder set to {}", self.icons_dir.display());
-                        }
+                        let start = self.icons_dir.clone();
+                        self.open_picker(ctx, move || {
+                            rfd::FileDialog::new()
+                                .set_title("Select Icons Folder")
+                                .set_directory(start)
+                                .pick_folder()
+                                .map(Picked::Folder)
+                        });
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -1332,7 +1295,8 @@ impl IconManagerApp {
 
         ui.add_space(6.0);
         let choose = ui
-            .add(
+            .add_enabled(
+                self.picker.is_none(),
                 secondary_button(&p, "Choose image…")
                     .min_size(Vec2::new(ui.available_width(), 34.0)),
             )
@@ -1351,7 +1315,14 @@ impl IconManagerApp {
         );
 
         if choose.clicked() {
-            self.choose_image(sel);
+            let entry = self.entries[sel].path.clone();
+            self.open_picker(ctx, move || {
+                rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "svg", "ico", "bmp", "webp"])
+                    .set_title("Select Icon Image")
+                    .pick_file()
+                    .map(|file| Picked::Icon { entry, file })
+            });
         }
 
         // ── Chrome PWA ──────────────────────────────────────────────────────
@@ -1391,8 +1362,12 @@ impl IconManagerApp {
                                 .margin(egui::vec2(10.0, 7.0))
                                 .hint_text("chrome-<appid>-Default"),
                         );
+                        // Only store an edit: storing the empty field of an
+                        // entry without the key would make Save add one.
                         let changed = wm_val != before;
-                        entry.startup_wm_class = Some(wm_val);
+                        if changed {
+                            entry.startup_wm_class = Some(wm_val);
+                        }
                         changed
                     };
                     if wm_changed {
@@ -1441,15 +1416,56 @@ impl IconManagerApp {
         ui.add_space(8.0);
     }
 
-    /// Pick an image, install it into the icon theme and point Icon= at it.
-    fn choose_image(&mut self, sel: usize) {
-        let picked = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "svg", "ico", "bmp", "webp"])
-            .set_title("Select Icon Image")
-            .pick_file();
-        let Some(src_path) = picked else { return };
+    /// Run a file picker on its own thread; `poll_picker` collects the result.
+    fn open_picker(
+        &mut self,
+        ctx: &egui::Context,
+        pick: impl FnOnce() -> Option<Picked> + Send + 'static,
+    ) {
+        if self.picker.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(pick());
+            ctx.request_repaint();
+        });
+        self.picker = Some(rx);
+    }
 
-        match self.import_icon(&src_path) {
+    fn poll_picker(&mut self) {
+        let Some(rx) = &self.picker else { return };
+        let picked = match rx.try_recv() {
+            Ok(picked) => picked,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.picker = None;
+        match picked {
+            Some(Picked::Icon { entry, file }) => self.apply_image(&entry, &file),
+            Some(Picked::Folder(dir)) => {
+                if let Err(e) = fs::create_dir_all(&dir) {
+                    self.global_status = format!("Could not create {}: {e}", dir.display());
+                    return;
+                }
+                self.icons_dir = dir;
+                self.icons_dir_input = self.icons_dir.display().to_string();
+                self.global_status = format!("Icon folder set to {}", self.icons_dir.display());
+            }
+            None => {}
+        }
+    }
+
+    /// Install a picked image into the icon theme and point the entry's
+    /// Icon= at it. The entry is found by path: the list may have been
+    /// reloaded while the picker was open.
+    fn apply_image(&mut self, entry: &Path, file: &Path) {
+        let Some(sel) = self.entries.iter().position(|e| e.path == entry) else {
+            self.global_status = "The entry was reloaded while choosing; pick the image again".into();
+            return;
+        };
+        match self.import_icon(file) {
             Ok(theme_name) => {
                 // The new icon is now in the theme: re-index and drop
                 // cached previews so it (and anything it replaced) reloads.
@@ -1526,5 +1542,60 @@ fn load_app_icon() -> egui::IconData {
         rgba:   icon_data::ICON_RGBA.to_vec(),
         width:  icon_data::ICON_WIDTH,
         height: icon_data::ICON_HEIGHT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_file(tag: &str, name: &str, content: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dim-save-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        fs::write(&p, content).unwrap();
+        p
+    }
+
+    const PWA: &str = "com.google.Chrome.flextop.chrome-abc-Default.desktop";
+
+    #[test]
+    fn saving_a_pwa_without_wm_class_adds_no_empty_key() {
+        let p = entry_file("nowm", PWA, "[Desktop Entry]\nName=Chat\nIcon=chrome-abc-Default\n");
+        let mut e = DesktopEntry::load(p.clone()).unwrap();
+        e.icon_value = "chat".into();
+        e.save().unwrap();
+        let out = fs::read_to_string(&p).unwrap();
+        assert!(out.contains("Icon=chat\n"));
+        assert!(!out.contains("StartupWMClass"), "{out}");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn a_cleared_wm_class_is_removed() {
+        let p = entry_file("clear", PWA, "[Desktop Entry]\nName=Chat\nStartupWMClass=old\nIcon=x\n");
+        let mut e = DesktopEntry::load(p.clone()).unwrap();
+        e.startup_wm_class = Some(String::new());
+        e.save().unwrap();
+        assert!(!fs::read_to_string(&p).unwrap().contains("StartupWMClass"));
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn keys_with_spaces_are_read_and_replaced_not_duplicated() {
+        let p = entry_file(
+            "spaces",
+            "app.desktop",
+            "[Desktop Entry]\nName = App\nIcon = old\n\n[Desktop Action new]\nIcon=action\n",
+        );
+        let mut e = DesktopEntry::load(p.clone()).unwrap();
+        assert_eq!((e.name.as_str(), e.icon_value.as_str()), ("App", "old"));
+        e.icon_value = "new".into();
+        e.save().unwrap();
+        let out = fs::read_to_string(&p).unwrap();
+        assert_eq!(out.matches("Icon=new").count(), 1, "{out}");
+        assert!(out.contains("Icon=action"), "other sections are left alone: {out}");
+        assert!(!out.contains("old"), "{out}");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
     }
 }
