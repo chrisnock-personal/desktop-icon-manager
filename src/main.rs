@@ -248,6 +248,19 @@ fn carry_over_edits(mut fresh: DesktopEntry, previous: &[DesktopEntry]) -> Deskt
     fresh
 }
 
+/// The theme name an `Icon=` value refers to: the value itself for a bare
+/// name (which may contain dots, like `org.gnome.Foo`), or the file stem for
+/// a path to a file.
+fn own_icon_name(icon_value: &str) -> Option<&str> {
+    if icon_value.is_empty() {
+        None
+    } else if icon_value.contains('/') {
+        Path::new(icon_value).file_stem().and_then(|s| s.to_str())
+    } else {
+        Some(icon_value)
+    }
+}
+
 /// The user-level launcher that shadows `path`, if `path` isn't already there.
 fn local_application_path(home: &Path, path: &Path) -> Option<PathBuf> {
     let dir = home.join(".local/share/applications");
@@ -527,21 +540,24 @@ impl IconManagerApp {
                 .iter()
                 .any(|dir| p.starts_with(dir))
         };
-        let current_is_ours = self
-            .entries
-            .iter()
-            .find(|e| e.path == entry)
+        let current = self.entries.iter().find(|e| e.path == entry);
+        let current_is_ours = current
             .and_then(|e| icons::resolve_icon_path(&e.icon_value, &self.icon_index))
             .is_some_and(|p| ours(&p));
+        // Only the entry's own current icon name may be reused: any other
+        // name with files in the user's folders belongs to another app.
+        let own_name = current
+            .filter(|_| current_is_ours)
+            .and_then(|e| own_icon_name(&e.icon_value));
 
         // Names are taken by icons in system themes *and* by icons another
         // app put in the user's folders. Re-importing the entry's own current
         // name is the one case where overwriting is safe.
         let taken = |name: &str| {
-            let files = install::installed_files(&targets, name);
-            if current_is_ours && files.iter().any(|p| ours(p) && p.exists()) {
+            if own_name == Some(name) {
                 return false;
             }
+            let files = install::installed_files(&targets, name);
             files.iter().any(|p| p.exists())
                 || icons::resolve_icon_path(name, &self.icon_index)
                     .is_some_and(|p| !ours(&p))
@@ -1692,6 +1708,15 @@ mod tests {
         let p = dir.join(name);
         fs::write(&p, content).unwrap();
         p
+    }
+
+    #[test]
+    fn only_the_entrys_own_icon_name_is_reusable() {
+        assert_eq!(own_icon_name("notes-custom"), Some("notes-custom"));
+        assert_eq!(own_icon_name("org.gnome.Notes"), Some("org.gnome.Notes"));
+        assert_eq!(own_icon_name("/home/u/Icons/notes-custom.png"), Some("notes-custom"));
+        assert_eq!(own_icon_name("~/Icons/music.svg"), Some("music"));
+        assert_eq!(own_icon_name(""), None);
     }
 
     const PWA: &str = "com.google.Chrome.flextop.chrome-abc-Default.desktop";
