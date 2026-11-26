@@ -327,12 +327,13 @@ fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
     ))
 }
 
-/// Find a complete `chrome-<appid>-Default` slug in `text`.
-/// App IDs are alphanumeric: a non-empty ID plus the `-Default` suffix
-/// distinguishes a PWA from names like `google-chrome` or `chrome--Default`.
+/// Find a complete `chrome-<appid>-<profile>` slug in `text`, where the
+/// profile is `Default` or `Profile_<n>` (Chrome's "Profile 1" folder, and so
+/// on, for apps installed in a second profile). App IDs are alphanumeric: a
+/// non-empty ID plus the profile suffix distinguishes a PWA from names like
+/// `google-chrome` or `chrome--Default`.
 fn chrome_pwa_slug(text: &str) -> Option<&str> {
     const PREFIX: &str = "chrome-";
-    const SUFFIX: &str = "-Default";
     let bytes = text.as_bytes();
 
     for (start, _) in text.match_indices(PREFIX) {
@@ -341,8 +342,18 @@ fn chrome_pwa_slug(text: &str) -> Option<&str> {
         while end < bytes.len() && bytes[end].is_ascii_alphanumeric() {
             end += 1;
         }
-        if end > id_start && text[end..].starts_with(SUFFIX) {
-            return Some(&text[start..end + SUFFIX.len()]);
+        if end == id_start {
+            continue;
+        }
+        let rest = &text[end..];
+        if rest.starts_with("-Default") {
+            return Some(&text[start..end + "-Default".len()]);
+        }
+        if let Some(after) = rest.strip_prefix("-Profile_") {
+            let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 {
+                return Some(&text[start..end + "-Profile_".len() + digits]);
+            }
         }
     }
     None
@@ -1861,6 +1872,14 @@ mod tests {
                 true,
                 Some("chrome-xyz-Default"),
             ),
+            // Apps installed in another Chrome profile.
+            (
+                "com.google.Chrome.flextop.chrome-abc-Profile_1.desktop",
+                "chrome-abc-Profile_1",
+                true,
+                Some("chrome-abc-Profile_1"),
+            ),
+            ("chrome-abc-Profile_.desktop", "", false, None),
             // Truncated and empty app IDs must not be detected.
             ("chrome-xyz.desktop", "google-chrome", false, None),
             ("chrome--Default.desktop", "chrome--Default", false, None),
