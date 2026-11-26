@@ -327,26 +327,39 @@ fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
     ))
 }
 
+/// Find a complete `chrome-<appid>-Default` slug in `text`.
+/// App IDs are alphanumeric: a non-empty ID plus the `-Default` suffix
+/// distinguishes a PWA from names like `google-chrome` or `chrome--Default`.
+fn chrome_pwa_slug(text: &str) -> Option<&str> {
+    const PREFIX: &str = "chrome-";
+    const SUFFIX: &str = "-Default";
+    let bytes = text.as_bytes();
+
+    for (start, _) in text.match_indices(PREFIX) {
+        let id_start = start + PREFIX.len();
+        let mut end = id_start;
+        while end < bytes.len() && bytes[end].is_ascii_alphanumeric() {
+            end += 1;
+        }
+        if end > id_start && text[end..].starts_with(SUFFIX) {
+            return Some(&text[start..end + SUFFIX.len()]);
+        }
+    }
+    None
+}
+
 /// Returns (is_chrome_pwa, Option<chrome_app_id_slug>).
 /// Chrome PWA .desktop filenames look like:
 ///   com.google.Chrome.flextop.chrome-<appid>-Default.desktop
 ///   chrome-<appid>-Default.desktop  (older format)
+/// The Icon value can also carry the `chrome-<appid>-Default` slug when the
+/// launcher name does not. A Chrome-branded launcher without a complete slug
+/// (such as `google-chrome.desktop`) is not a PWA.
 fn detect_chrome_pwa(filename: &str, icon_value: &str) -> (bool, Option<String>) {
-    // Pattern 1: com.google.Chrome… prefix
-    if filename.contains("com.google.Chrome") || filename.contains("google-chrome") {
-        // Try to extract slug like "chrome-<id>-Default"
-        let stem = filename.strip_suffix(".desktop").unwrap_or(filename);
-        // Find "chrome-" within the stem
-        if let Some(idx) = stem.find("chrome-") {
-            let slug = &stem[idx..];
-            return (true, Some(slug.to_string()));
-        }
-        return (true, None);
-    }
+    let stem = filename.strip_suffix(".desktop").unwrap_or(filename);
 
-    // Pattern 2: icon value itself looks like chrome-<id>-Default
-    if icon_value.starts_with("chrome-") && icon_value.ends_with("-Default") {
-        return (true, Some(icon_value.to_string()));
+    if let Some(slug) = chrome_pwa_slug(stem).or_else(|| chrome_pwa_slug(icon_value)) {
+        return (true, Some(slug.to_string()));
     }
 
     (false, None)
@@ -1821,6 +1834,46 @@ mod tests {
     }
 
     const PWA: &str = "com.google.Chrome.flextop.chrome-abc-Default.desktop";
+
+    #[test]
+    fn chrome_pwa_detection_requires_a_complete_app_id_slug() {
+        let cases = [
+            // Ordinary Chrome launchers are not web apps.
+            ("google-chrome.desktop", "google-chrome", false, None),
+            ("com.google.Chrome.desktop", "com.google.Chrome", false, None),
+            // Flextop and older filename formats keep their exact slug.
+            (
+                "com.google.Chrome.flextop.chrome-abc-Default.desktop",
+                "chrome-abc-Default",
+                true,
+                Some("chrome-abc-Default"),
+            ),
+            (
+                "chrome-xyz-Default.desktop",
+                "",
+                true,
+                Some("chrome-xyz-Default"),
+            ),
+            // The Icon alone can identify a PWA when the filename cannot.
+            (
+                "some-app.desktop",
+                "chrome-xyz-Default",
+                true,
+                Some("chrome-xyz-Default"),
+            ),
+            // Truncated and empty app IDs must not be detected.
+            ("chrome-xyz.desktop", "google-chrome", false, None),
+            ("chrome--Default.desktop", "chrome--Default", false, None),
+            ("google-chrome.desktop", "chrome-xyz", false, None),
+        ];
+
+        for (filename, icon, expected_is_pwa, expected_slug) in cases {
+            let (is_pwa, slug) = detect_chrome_pwa(filename, icon);
+            let context = format!("filename: {filename}, icon: {icon}");
+            assert_eq!(is_pwa, expected_is_pwa, "{context}");
+            assert_eq!(slug.as_deref(), expected_slug, "{context}");
+        }
+    }
 
     fn draft(path: &str, icon: &str, modified: bool) -> DesktopEntry {
         DesktopEntry {
